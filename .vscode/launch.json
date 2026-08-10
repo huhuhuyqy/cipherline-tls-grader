@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "TLS Grader: Debug and Open",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\server.py",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": ["--open"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "TLS Grader: Prepare Environment"
+    }
+  ]
+}
+

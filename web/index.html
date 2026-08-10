@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Local TLS security grading and research console for SUTD Tools Lab P3">
+  <title>CIPHERLINE - Local TLS Research Console</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#overview" data-route="overview" aria-label="CIPHERLINE home">
+        <span class="brand-mark">CL</span><span><b>CIPHERLINE</b><small>LOCAL TLS LAB</small></span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <button class="nav-item active" data-route="overview"><span>01</span>Overview</button>
+        <button class="nav-item" data-route="scan"><span>02</span>Scan lab</button>
+        <button class="nav-item" data-route="results"><span>03</span>Evidence</button>
+        <button class="nav-item" data-route="analysis"><span>04</span>Analysis</button>
+        <button class="nav-item" data-route="method"><span>05</span>Method</button>
+      </nav>
+      <div class="system-card">
+        <div class="status-line"><i id="health-dot"></i><span id="health-text">Connecting</span></div>
+        <small>127.0.0.1 / local storage</small>
+        <small id="openssl-status">Detecting OpenSSL...</small>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div><span class="eyebrow">SUTD / TOOLS LAB 1 / P3</span><h1 id="page-title">Research overview</h1></div>
+        <div class="top-actions">
+          <button class="btn ghost" data-reset-project>Reset project</button>
+          <button class="btn ghost" id="refresh-all">Refresh</button>
+          <button class="btn primary" data-route="scan">New scan <span>&nearr;</span></button>
+        </div>
+      </header>
+
+      <section class="page active" id="page-overview">
+        <div class="overview-intro">
+          <div><span class="eyebrow">RESEARCH OVERVIEW</span><h2>Configurable TLS comparison study</h2><p>Track collection progress, inspect evidence, and compare any two country or sector labels found in the uploaded dataset.</p></div>
+          <div class="overview-actions"><button class="btn ghost" data-route="analysis">View analysis</button><button class="btn primary" data-route="scan">Collect evidence &rarr;</button></div>
+        </div>
+
+        <article id="overview-empty-guide" class="empty-onboarding hidden">
+          <div class="onboarding-number">01</div>
+          <div><span class="eyebrow">START HERE</span><h2>No evidence has been collected yet.</h2><p>Upload either a one-column hostname list or a labelled CSV. Every target receives the complete assessment.</p></div>
+          <button class="btn primary" data-route="scan">Upload a CSV &rarr;</button>
+        </article>
+
+        <div class="workflow-guide" aria-label="Research workflow">
+          <article><span>01</span><div><b>Upload CSV</b><small>Select the prepared target list</small></div></article>
+          <article><span>02</span><div><b>Run full assessment</b><small>Collect complete TLS evidence</small></div></article>
+          <article><span>03</span><div><b>Inspect evidence</b><small>Open every result for details</small></div></article>
+          <article><span>04</span><div><b>Review conclusions</b><small>Compare sectors and countries</small></div></article>
+        </div>
+
+        <div class="metric-grid">
+          <article class="metric panel"><span>VALID OBSERVATIONS</span><strong id="metric-real">0</strong><small>All supported study sectors</small></article>
+          <article class="metric panel"><span>MEAN TLS SCORE</span><strong id="metric-mean">--</strong><small>Across unique completed scans</small></article>
+          <article class="metric panel"><span>TLS 1.3 ADOPTION</span><strong id="metric-tls13">--</strong><small>Modern protocol support</small></article>
+          <article class="metric panel"><span>CRITICAL FINDINGS</span><strong class="danger-text" id="metric-critical">0</strong><small>Certificate or configuration failures</small></article>
+        </div>
+
+        <div class="two-col wide-left">
+          <article class="panel section-card">
+            <div class="section-head"><div><span class="eyebrow">OBSERVED LABEL COMBINATIONS</span><h3>Groups read from uploaded data</h3></div><span class="pill">DYNAMIC</span></div>
+            <div id="strata-progress" class="strata-list"></div>
+          </article>
+          <article class="panel section-card">
+            <div class="section-head"><div><span class="eyebrow">LATEST ACTIVITY</span><h3>Recent evidence</h3></div><button class="text-btn" data-route="results">See all</button></div>
+            <div id="recent-list" class="recent-list empty-state">No scans yet.</div>
+          </article>
+        </div>
+
+        <article class="panel local-banner">
+          <div class="local-icon">L</div><div><b>Everything stays on this computer</b><p>The console, SQLite database, scan evidence, and exported reports run locally. TLS connections go only to websites you explicitly scan.</p></div>
+        </article>
+      </section>
+
+      <section class="page" id="page-scan">
+        <div class="page-guide"><span>STEP 1 OF 4</span><div><b>Choose a collection method</b><small>Upload the study CSV or inspect one site separately. Every run uses the complete assessment.</small></div></div>
+        <div class="two-col equal">
+          <article class="panel section-card">
+            <div class="section-head"><div><span class="eyebrow">ONE TARGET</span><h3>Single-site assessment</h3></div><span class="tag">FULL</span></div>
+            <form id="single-form" class="form-stack">
+              <label>Hostname or HTTPS URL<input name="hostname" required placeholder="www.example.gov.sg" autocomplete="off"></label>
+              <div class="form-grid">
+                <label>Country label<input name="country" list="country-labels" required placeholder="Enter any country label"></label>
+                <label>Sector label<input name="sector" list="sector-labels" required placeholder="Enter any sector label"></label>
+              </div>
+              <div class="form-grid">
+                <label>Port<input name="port" type="number" min="1" max="65535" value="443"></label>
+                <label>Sampling source<input name="source" placeholder="Official directory / verified list"></label>
+              </div>
+              <p class="form-note">The complete assessment checks certificate trust, hostname, expiry, revocation, signatures, TLS 1.3 through SSL 2.0, all locally supported TLS 1.2 cipher candidates, and accepted finite-field DHE strength.</p>
+              <button class="btn primary full" type="submit">Start full TLS assessment</button>
+            </form>
+          </article>
+
+          <article class="panel section-card">
+            <div class="section-head"><div><span class="eyebrow">RECOMMENDED / MANY TARGETS</span><h3>Upload CSV and collect</h3></div><span class="pill">NO ROW LIMIT</span></div>
+            <label class="drop-zone" for="csv-file"><span>+</span><b>Choose or drop a CSV file</b><small>Accepts a one-column hostname list with no header, or hostname/country/sector columns. The file stays local.</small></label>
+            <input id="csv-file" class="visually-hidden" type="file" accept=".csv,text/csv">
+            <div id="file-confirm" class="file-confirm" aria-live="polite">
+              <div class="file-status-icon">CSV</div>
+              <div class="file-confirm-copy"><span id="file-status-label">WAITING FOR FILE</span><strong id="file-name">No CSV selected</strong><small id="file-summary">Choose a study file above.</small></div>
+              <button class="text-btn" id="change-file" type="button">Choose file</button>
+            </div>
+            <div class="batch-footer"><span class="pill">FULL ASSESSMENT</span><button class="btn primary" id="start-batch" disabled>Run uploaded CSV &rarr;</button></div>
+          </article>
+        </div>
+
+        <article class="panel section-card jobs-card">
+          <div class="section-head"><div><span class="eyebrow">TASK QUEUE</span><h3>Collection progress</h3></div><button class="text-btn" id="refresh-jobs">Refresh</button></div>
+          <div id="jobs-list" class="jobs-list empty-state">No scan jobs yet.</div>
+        </article>
+      </section>
+
+      <section class="page" id="page-results">
+        <article class="panel section-card">
+          <div class="section-head results-head">
+            <div><span class="eyebrow">AUDIT TRAIL</span><h3>Collected TLS evidence</h3></div>
+            <div class="export-row"><a class="btn ghost" id="export-csv" href="/api/export.csv">Export CSV</a><a class="btn primary" id="export-html" href="/api/export.html">HTML report</a></div>
+          </div>
+          <div class="evidence-hint"><span>OPEN A RESULT</span><p>Every row includes a direct prompt. Select a row to view certificate identity, protocols, ciphers, findings, remediation, and raw OpenSSL evidence.</p></div>
+          <div class="filterbar evidence-filterbar">
+            <input id="result-search" placeholder="Search hostname..." aria-label="Search hostname">
+            <select id="filter-country"><option value="">All countries</option></select>
+            <select id="filter-sector"><option value="">All sectors</option></select>
+          </div>
+          <div class="table-wrap"><table class="data-table"><thead><tr><th>Target</th><th>Group</th><th>Certificate</th><th>Configuration</th><th>Overall</th><th>Grade</th><th>Scanned</th><th>Detailed evidence</th></tr></thead><tbody id="results-body"></tbody></table></div>
+          <div id="results-empty" class="empty-state hidden">No matching evidence. Go to Scan lab and upload a CSV to begin.</div>
+        </article>
+      </section>
+
+      <section class="page" id="page-analysis">
+        <article class="analysis-toolbar panel comparison-builder">
+          <div class="builder-intro"><span class="eyebrow">CUSTOM COMPARISON BUILDER</span><b>No comparison is selected by default</b><small id="dataset-note">Choose a label field and two labels read from your scan data.</small></div>
+          <div class="builder-fields">
+            <label>Compare labels from<select id="compare-field"><option value="">Select country or sector</option><option value="country">Country</option><option value="sector">Sector</option></select></label>
+            <label>Group A<select id="group-a" disabled><option value="">Select Group A</option></select></label>
+            <label>Group B<select id="group-b" disabled><option value="">Select Group B</option></select></label>
+          </div>
+          <div class="strata-builder hidden" id="strata-builder">
+            <span class="eyebrow">CONTROL STRATA</span>
+            <p id="strata-help">Choose which control labels to include.</p>
+            <div class="sector-choice-list" id="strata-choices" role="group" aria-label="Control strata"></div>
+          </div>
+        </article>
+        <article class="panel conclusion-card" id="conclusion-card">
+          <div class="conclusion-status" id="conclusion-status">AWAITING SELECTION</div>
+          <div><span class="eyebrow" id="comparison-eyebrow">USER-DEFINED COMPARISON</span><h2 id="conclusion-text">Select two labels to begin the analysis.</h2><p id="conclusion-detail"></p></div>
+        </article>
+        <div class="analysis-group-grid" id="analysis-groups"></div>
+        <article class="panel section-card comparison-result-panel hidden" id="comparison-result-panel"><div class="section-head"><div><span class="eyebrow">SELECTED COMPARISON</span><h3 id="comparison-title">Group A vs Group B</h3></div></div><div id="comparison-bars" class="bar-chart"></div><dl class="stat-list" id="comparison-stat-list"></dl></article>
+        <article class="panel section-card"><div class="section-head"><div><span class="eyebrow">FINDING PROFILE</span><h3>Observed issues by severity</h3></div></div><div id="finding-bars" class="severity-grid"></div></article>
+      </section>
+
+      <section class="page" id="page-method">
+        <div class="method-hero"><span class="tag teal">REPRODUCIBLE BY DESIGN</span><h2>From a live handshake to a defensible conclusion.</h2><p>The workflow preserves target metadata, certificate evidence, protocol probes, cipher support, scores, and timestamps in one local database.</p></div>
+        <div class="method-steps">
+          <article class="panel"><span>01</span><h3>Define the dataset</h3><p>A hostname-only list supports descriptive analysis. Add country and sector columns when a grouped comparison is required.</p></article>
+          <article class="panel"><span>02</span><h3>Collect full evidence</h3><p>Validate trust, expiry, revocation, and signatures; test TLS 1.3 through SSL 2.0; measure DHE and cipher strengths.</p></article>
+          <article class="panel"><span>03</span><h3>Score consistently</h3><p>Certificate quality contributes 40%; protocol, key exchange, and cipher strength form the 60% configuration score.</p></article>
+          <article class="panel"><span>04</span><h3>Build a comparison</h3><p>Select any two observed country or sector labels. The other label field is used as the stratification control.</p></article>
+        </div>
+        <div class="two-col equal">
+          <article class="panel section-card"><span class="eyebrow">SCORING MODEL</span><h3>100-point grade</h3><div class="score-model"><div><b>40</b><span>Certificate</span></div><div><b>21</b><span>Protocols</span></div><div><b>21</b><span>Key exchange</span></div><div><b>18</b><span>Ciphers</span></div></div><p class="form-note">Critical trust, expiry, revocation, and hostname failures cap the final grade. Findings and remediation remain attached to every result.</p></article>
+          <article class="panel section-card"><span class="eyebrow">IMPORTANT INTERPRETATION</span><h3>SHA-1 fingerprint &ne; SHA-1 signature</h3><p>The SHA-1 fingerprint is only a certificate identifier. The signature algorithm is evaluated separately; an actual SHA-1 or MD5 signature is penalised.</p><p class="form-note">Results describe one point in time and one network location. CDN routing, transient failures, and inaccessible sites remain limitations.</p></article>
+        </div>
+        <article class="panel section-card requirement-coverage">
+          <div class="section-head"><div><span class="eyebrow">P3 REQUIREMENT COVERAGE</span><h3>Implementation checklist</h3></div><span class="pill">COMPLETE</span></div>
+          <div class="coverage-grid">
+            <div><b>Certificate validity</b><span>CA trust / hostname / expiry / revocation / MD5 and SHA-1 signatures</span></div>
+            <div><b>Protocol support</b><span>TLS 1.3 / 1.2 / 1.1 / 1.0 / SSL 3.0 / SSL 2.0</span></div>
+            <div><b>Key exchange</b><span>Negotiated method / forward secrecy / accepted DHE minimum and maximum bits</span></div>
+            <div><b>Symmetric ciphers</b><span>Accepted suites / effective bits / below-128 penalties / 256-bit recognition</span></div>
+            <div><b>Overall grade</b><span>Published 40/21/21/18 weighting / critical grade caps / remediation</span></div>
+            <div><b>Research use case</b><span>CSV-driven labels / user-defined groups / visuals / permutation tests / bootstrap intervals</span></div>
+          </div>
+        </article>
+        <article class="panel danger-zone"><div><span class="eyebrow">LOCAL DATA CONTROL</span><h3>Reset project</h3><p>Delete all scan evidence and task history when you need to start the study again.</p></div><div class="danger-actions"><button class="btn danger" data-reset-project>Reset project</button></div></article>
+      </section>
+    </main>
+  </div>
+
+  <datalist id="country-labels"></datalist>
+  <datalist id="sector-labels"></datalist>
+
+  <dialog id="detail-dialog">
+    <div class="dialog-head"><div><span class="eyebrow">TLS EVIDENCE RECORD</span><h2 id="detail-title">Target</h2></div><button class="icon-btn" id="close-detail" aria-label="Close">&times;</button></div>
+    <div id="detail-content"></div>
+  </dialog>
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

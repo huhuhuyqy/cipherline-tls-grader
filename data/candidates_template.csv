@@ -1,0 +1,6 @@
+hostname,country,sector,source
+example.gov.cn,China,Government,manual-verification-required
+example.edu.cn,China,Education,manual-verification-required
+example.gov.sg,Singapore,Government,manual-verification-required
+example.edu.sg,Singapore,Education,manual-verification-required
+

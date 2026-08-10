@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+data/tls_grader.db
+exports/*.html
+exports/*.csv
+exports/*.json
+logs/*.log
+tls-results.csv
