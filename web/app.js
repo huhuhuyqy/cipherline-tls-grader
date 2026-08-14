@@ -2,11 +2,19 @@
 
 const state = {
   scans: [],
+  recentScans: [],
+  evidenceLabels: {country:[], sector:[]},
+  scansTotal: 0,
+  scansPage: 1,
+  scansPageSize: 50,
   jobs: [],
   analysis: null,
   analysisSelection: {compareField: "", groupA: "", groupB: "", strata: []},
-  batchFileText: "",
   batchTargets: [],
+  csrfToken: "",
+  pollInFlight: false,
+  jobFingerprint: "",
+  lastError: {message:"", time:0},
 };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -16,7 +24,12 @@ const safe = (value) => String(value ?? "--").replace(/[&<>'"]/g, character => (
 const number = (value, suffix = "") => (
   value === null || value === undefined ? "--" : `${Number(value).toFixed(Number(value) % 1 ? 1 : 0)}${suffix}`
 );
-const isScored = scan => scan.status === "completed" && Number.isFinite(Number(scan.scores?.overall));
+const isScored = scan => (
+  scan.status === "completed"
+  && scan.assessment_version === "2.3"
+  && scan.evidence_schema_version === 2
+  && Number.isFinite(Number(scan.scores?.overall))
+);
 const date = value => {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value || "--";
@@ -31,11 +44,22 @@ const date = value => {
 };
 
 async function api(path, options = {}) {
-  const config = {...options, headers: {"Content-Type":"application/json", ...(options.headers || {})}};
+  const method = String(options.method || "GET").toUpperCase();
+  const headers = {...(options.headers || {})};
+  if (!["GET", "HEAD"].includes(method)) {
+    if (!state.csrfToken) await refreshHealth();
+    if (!state.csrfToken) throw new Error("The local security session is unavailable. Restart the local service and refresh this page.");
+    headers["Content-Type"] = "application/json";
+    headers["X-CSRF-Token"] = state.csrfToken;
+  }
+  const config = {...options, method, headers};
   const response = await fetch(path, config);
   const contentType = response.headers.get("content-type") || "";
   const data = contentType.includes("json") ? await response.json() : await response.text();
-  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+  if (!response.ok) {
+    const message = data?.error?.message || data?.error || `Request failed (${response.status})`;
+    throw new Error(typeof message === "string" ? message : `Request failed (${response.status})`);
+  }
   return data;
 }
 
@@ -62,9 +86,18 @@ function navigate(route) {
   $("#page-title").textContent = titles[route];
   history.replaceState(null, "", `#${route}`);
   window.scrollTo({top:0, behavior:"smooth"});
-  if (route === "results") refreshScans();
-  if (route === "analysis") refreshAnalysis();
-  if (route === "scan") refreshJobs();
+  if (route === "results") refreshScans().catch(error => showDataError(error));
+  if (route === "analysis") refreshAnalysis().catch(error => showDataError(error));
+  if (route === "scan") refreshJobs().catch(error => showDataError(error));
+  if (route === "overview") refreshRecent().catch(error => showDataError(error));
+}
+
+function showDataError(error) {
+  const message = String(error?.message || "Unknown local service error");
+  const now = Date.now();
+  if (state.lastError.message === message && now - state.lastError.time < 10000) return;
+  state.lastError = {message, time:now};
+  toast(`Could not refresh local data. ${message}`, true);
 }
 
 function analysisQuery() {
@@ -85,29 +118,67 @@ function updateExportLinks() {
 
 async function refreshHealth() {
   try {
-    const [health, capabilities] = await Promise.all([api("/api/health"), api("/api/capabilities")]);
+    const health = await api("/api/health");
+    state.csrfToken = health.csrf_token || state.csrfToken;
     $("#health-dot").classList.add("ok");
     $("#health-text").textContent = `Local engine v${health.version || "?"} online`;
-    const legacy = capabilities.ssl2_ssl3 === "raw_client_hello_probe" ? " / SSL2 and SSL3 active" : " / SSL2 and SSL3 unavailable";
-    $("#openssl-status").textContent = `${capabilities.openssl_version || "OpenSSL not found"}${legacy}`;
+    try {
+      const capabilities = await api("/api/capabilities");
+      const legacy = capabilities.ssl2_ssl3 === "raw_client_hello_probe" ? " / SSL2 and SSL3 active" : " / SSL2 and SSL3 unavailable";
+      $("#openssl-status").textContent = `${capabilities.openssl_version || "OpenSSL not found"}${legacy}`;
+    } catch (_) {
+      $("#openssl-status").textContent = "Scanner capabilities unavailable";
+    }
   } catch (error) {
+    $("#health-dot").classList.remove("ok");
     $("#health-text").textContent = "Engine unavailable";
-    $("#openssl-status").textContent = error.message;
+    $("#openssl-status").textContent = "Start or restart the local service";
+    throw error;
   }
 }
 
+function scanQuery() {
+  const parameters = new URLSearchParams({
+    summary: "1",
+    limit: String(state.scansPageSize),
+    offset: String((state.scansPage - 1) * state.scansPageSize),
+  });
+  const search = $("#result-search").value.trim();
+  const country = $("#filter-country").value;
+  const sector = $("#filter-sector").value;
+  if (search) parameters.set("search", search);
+  if (country) parameters.set("country", country);
+  if (sector) parameters.set("sector", sector);
+  return parameters.toString();
+}
+
 async function refreshScans() {
-  const data = await api("/api/scans?limit=0");
+  const data = await api(`/api/scans?${scanQuery()}`);
   state.scans = data.items;
+  if (data.available_labels) state.evidenceLabels = data.available_labels;
+  state.scansTotal = Number(data.total ?? data.count ?? state.scans.length);
+  const maximumPage = Math.max(1, Math.ceil(state.scansTotal / state.scansPageSize));
+  if (state.scansPage > maximumPage) {
+    state.scansPage = maximumPage;
+    return refreshScans();
+  }
   renderResults();
   renderRecent();
-  updateDataLabelControls();
+  updateEvidenceFilterControls();
   if (state.analysis) renderOverview();
   return state.scans;
 }
 
+async function refreshRecent() {
+  const data = await api("/api/scans?summary=1&limit=5&offset=0");
+  state.recentScans = data.items || [];
+  renderRecent();
+  return state.recentScans;
+}
+
 async function refreshAnalysis() {
   state.analysis = await api(`/api/analysis?${analysisQuery()}`);
+  updateDataLabelControls();
   renderAnalysis();
   renderOverview();
   updateExportLinks();
@@ -116,33 +187,29 @@ async function refreshAnalysis() {
 
 async function refreshAll() {
   try {
-    await Promise.all([refreshHealth(), refreshScans(), refreshJobs()]);
-    await refreshAnalysis();
+    await refreshHealth();
+    await Promise.all([refreshScans(), refreshRecent(), refreshJobs(), refreshAnalysis()]);
   } catch (error) {
-    toast(error.message, true);
+    showDataError(error);
+    throw error;
   }
-}
-
-function uniqueCompletedScans() {
-  const seenTargets = new Set();
-  return state.scans.filter(scan => {
-    const key = `${String(scan.hostname || "").toLowerCase()}:${scan.port || 443}`;
-    if (scan.status !== "completed" || seenTargets.has(key)) return false;
-    seenTargets.add(key);
-    return true;
-  });
 }
 
 function renderOverview() {
   const analysis = state.analysis;
   if (!analysis) return;
   $("#metric-real").textContent = analysis.total_collected ?? analysis.collected;
-  $("#overview-empty-guide").classList.toggle("hidden", state.scans.length > 0);
-  const valid = uniqueCompletedScans();
-  const scores = valid.map(scan => Number(scan.scores?.overall)).filter(Number.isFinite);
-  $("#metric-mean").textContent = scores.length ? number(scores.reduce((left, right) => left + right, 0) / scores.length) : "--";
-  const tls13 = valid.filter(scan => scan.protocols?.["TLS 1.3"] === "supported").length;
-  $("#metric-tls13").textContent = valid.length ? number(tls13 / valid.length * 100, "%") : "--";
+  const needsCollection = !analysis.total_collected;
+  const hasLegacyEvidence = needsCollection && Number(analysis.total_records || 0) > 0;
+  $("#overview-empty-guide").classList.toggle("hidden", !needsCollection);
+  $("#overview-guide-title").textContent = hasLegacyEvidence
+    ? "Existing evidence needs a current-method rescan."
+    : "No evidence has been collected yet.";
+  $("#overview-guide-body").textContent = hasLegacyEvidence
+    ? `${analysis.legacy_methodology_excluded || analysis.total_records} legacy-method record(s) remain available in Evidence but are excluded from the current analysis. Upload the targets again to collect assessment v${analysis.assessment_version || "2.3"} evidence.`
+    : "Upload either a one-column hostname list or a labelled CSV. Every target receives the complete assessment.";
+  $("#metric-mean").textContent = number(analysis.overall_summary?.mean);
+  $("#metric-tls13").textContent = number(analysis.overall_summary?.tls13_rate, "%");
   $("#metric-critical").textContent = analysis.finding_counts?.critical || 0;
   const combinations = analysis.combinations || [];
   const maximum = Math.max(1, ...combinations.map(item => item.n));
@@ -154,7 +221,7 @@ function renderOverview() {
 }
 
 function renderRecent() {
-  const recent = state.scans.slice(0, 5);
+  const recent = state.recentScans;
   $("#recent-list").classList.toggle("empty-state", !recent.length);
   $("#recent-list").innerHTML = recent.length ? recent.map(scan => (
     `<div class="recent-item"><div><b>${safe(scan.hostname)}</b><small>${safe(scan.country)} / ${safe(scan.sector)} / ${safe(date(scan.scan_time))}</small></div><span class="grade grade-${safe(isScored(scan) ? scan.scores?.grade : "NA")}">${safe(isScored(scan) ? scan.scores?.grade : "N/A")}</span></div>`
@@ -162,16 +229,9 @@ function renderRecent() {
 }
 
 function renderResults() {
-  const search = $("#result-search").value.trim().toLowerCase();
-  const country = $("#filter-country").value;
-  const sector = $("#filter-sector").value;
-  const rows = state.scans.filter(scan => (
-    (!search || scan.hostname.toLowerCase().includes(search))
-    && (!country || scan.country === country)
-    && (!sector || scan.sector === sector)
-  ));
+  const rows = state.scans;
   $("#results-body").innerHTML = rows.map(scan => `<tr data-scan-id="${safe(scan.id)}">
-    <td class="target-cell"><b>${safe(scan.hostname)}</b><small>:${safe(scan.port)}</small></td>
+    <td class="target-cell"><b>${safe(scan.hostname)}</b><small>:${safe(scan.port)}</small>${scan.methodology_status === "legacy_methodology" || scan.assessment_version !== "2.3" || scan.evidence_schema_version !== 2 ? '<span class="legacy-badge">Legacy methodology — rescan required</span>' : ""}</td>
     <td>${safe(scan.country)}<br><small>${safe(scan.sector)}</small></td>
     <td><span class="score-dot">${isScored(scan) ? number(scan.scores?.certificate) : "--"}</span></td>
     <td>${isScored(scan) ? number(scan.scores?.configuration) : "--"}</td>
@@ -181,7 +241,23 @@ function renderResults() {
     <td><button class="row-detail-prompt" type="button">Click to view detailed results</button></td>
   </tr>`).join("");
   $("#results-empty").classList.toggle("hidden", rows.length > 0);
-  $$("#results-body tr").forEach(row => row.addEventListener("click", () => openDetail(row.dataset.scanId)));
+  $$("#results-body tr").forEach(row => {
+    row.addEventListener("click", () => openDetail(row.dataset.scanId));
+    row.querySelector(".row-detail-prompt").addEventListener("click", event => {
+      event.stopPropagation();
+      openDetail(row.dataset.scanId);
+    });
+  });
+  renderPagination();
+}
+
+function renderPagination() {
+  const maximumPage = Math.max(1, Math.ceil(state.scansTotal / state.scansPageSize));
+  $("#results-prev").disabled = state.scansPage <= 1;
+  $("#results-next").disabled = state.scansPage >= maximumPage;
+  const first = state.scansTotal ? (state.scansPage - 1) * state.scansPageSize + 1 : 0;
+  const last = Math.min(state.scansPage * state.scansPageSize, state.scansTotal);
+  $("#results-page-status").textContent = `Page ${state.scansPage} of ${maximumPage} / ${first}–${last} of ${state.scansTotal}`;
 }
 
 function replaceSelectOptions(select, firstLabel, values) {
@@ -191,34 +267,74 @@ function replaceSelectOptions(select, firstLabel, values) {
 }
 
 function updateDataLabelControls() {
-  const countries = [...new Set(state.scans.map(scan => String(scan.country || "").trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
-  const sectors = [...new Set(state.scans.map(scan => String(scan.sector || "").trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
-  replaceSelectOptions($("#filter-country"), "All countries", countries);
-  replaceSelectOptions($("#filter-sector"), "All sectors", sectors);
+  const countries = state.analysis?.available_labels?.country || [];
+  const sectors = state.analysis?.available_labels?.sector || [];
   $("#country-labels").innerHTML = countries.map(value => `<option value="${safe(value)}"></option>`).join("");
   $("#sector-labels").innerHTML = sectors.map(value => `<option value="${safe(value)}"></option>`).join("");
 }
 
+function updateEvidenceFilterControls() {
+  replaceSelectOptions($("#filter-country"), "All countries", state.evidenceLabels.country || []);
+  replaceSelectOptions($("#filter-sector"), "All sectors", state.evidenceLabels.sector || []);
+}
+
 async function refreshJobs() {
-  try {
-    const data = await api("/api/jobs");
-    state.jobs = data.items;
-    renderJobs();
-  } catch (error) {
-    toast(error.message, true);
+  const data = await api("/api/jobs");
+  state.jobs = data.items;
+  renderJobs();
+  return state.jobs;
+}
+
+function jobMessage(job) {
+  const completed = Number(job.completed || 0);
+  const failed = Number(job.failed || 0);
+  const cancelled = Number(job.cancelled || 0);
+  const inconclusive = Number(job.inconclusive || 0);
+  const status = String(job.status || "unknown").replaceAll("_", " ");
+  const errorCode = String(job.current_error_code || job.first_error_code || "").trim();
+  const errorMessage = String(job.current_error || job.first_error || "").trim();
+  const issue = errorCode || errorMessage
+    ? ` Last issue: ${[errorCode, errorMessage].filter(Boolean).join(" — ")}.`
+    : "";
+  if (["queued", "running", "cancelling"].includes(job.status)) {
+    return `${status}. ${completed} completed, ${failed} failed, ${inconclusive} inconclusive, ${cancelled} cancelled.${issue}`;
   }
+  if (job.status === "completed") return `Finished. ${completed} assessments completed.`;
+  if (job.status === "completed_with_errors") return `Finished with errors. ${completed} completed; ${failed} failed; ${inconclusive} inconclusive.${issue}`;
+  if (job.status === "cancelled") return `Cancelled. ${completed} completed; ${cancelled} cancelled. Resume to continue from the saved checkpoint.${issue}`;
+  if (job.status === "interrupted") return `Interrupted before completion. Resume to continue from the saved checkpoint.${issue}`;
+  return `Job status: ${status}.${issue} Review individual records in Evidence for diagnostic details.`;
 }
 
 function renderJobs() {
   const target = $("#jobs-list");
   target.classList.toggle("empty-state", !state.jobs.length);
   target.innerHTML = state.jobs.length ? state.jobs.map(job => {
-    const done = job.completed + job.failed;
-    const status = safe(job.status.replaceAll("_", " ").toUpperCase());
+    const done = Number(job.completed || 0) + Number(job.failed || 0) + Number(job.cancelled || 0) + Number(job.inconclusive || 0);
+    const status = safe(String(job.status || "unknown").replaceAll("_", " ").toUpperCase());
     const current = job.current_target ? `Current: ${safe(job.current_target)}` : `Created ${safe(date(job.created_at))}`;
-    return `<div class="job-item"><div class="job-top"><div><b>${status}</b><small>${safe(job.message || "")}</small></div><small>${done} / ${job.total} / ${job.percent}%</small></div><div class="progress"><i style="width:${job.percent}%"></i></div><small>${current}${job.failed ? ` / ${job.failed} failed` : ""}</small></div>`;
+    const cancel = job.cancellable ? `<button class="text-btn job-action" type="button" data-cancel-job="${safe(job.id)}">Cancel</button>` : "";
+    const resume = job.resumable ? `<button class="text-btn job-action" type="button" data-resume-job="${safe(job.id)}">Resume</button>` : "";
+    return `<div class="job-item"><div class="job-top"><div><b>${status}</b><small>${safe(jobMessage(job))}</small></div><small>${done} / ${job.total} / ${job.percent}%</small></div><div class="progress"><i style="width:${Math.max(0, Math.min(100, Number(job.percent) || 0))}%"></i></div><div class="job-footer"><small>${current}</small><div>${cancel}${resume}</div></div></div>`;
   }).join("") : "No scan jobs yet.";
-  $("#start-batch").disabled = state.jobs.some(job => ["queued","running"].includes(job.status)) || !state.batchTargets.length;
+  $$('[data-cancel-job]').forEach(button => button.addEventListener("click", () => changeJobState(button.dataset.cancelJob, "cancel", button)));
+  $$('[data-resume-job]').forEach(button => button.addEventListener("click", () => changeJobState(button.dataset.resumeJob, "resume", button)));
+  $("#start-batch").disabled = state.jobs.some(job => ["queued","running","cancelling"].includes(job.status)) || !state.batchTargets.length;
+}
+
+async function changeJobState(jobId, action, button) {
+  button.disabled = true;
+  const label = button.textContent;
+  button.textContent = action === "cancel" ? "Cancelling..." : "Resuming...";
+  try {
+    await api(`/api/jobs/${encodeURIComponent(jobId)}/${action}`, {method:"POST", body:"{}"});
+    toast(action === "cancel" ? "Cancellation requested" : "Assessment resumed from its saved checkpoint");
+    await refreshJobs();
+  } catch (error) {
+    showDataError(error);
+    button.disabled = false;
+    button.textContent = label;
+  }
 }
 
 function renderAnalysis() {
@@ -296,15 +412,30 @@ function valueRows(values) {
   }).join("");
 }
 
+function protocolDisplay(status) {
+  if (status === "unsupported" || status === "not_supported" || status === "inferred_unsupported") {
+    return status === "inferred_unsupported" ? "not supported (inferred)" : "not supported";
+  }
+  if (status === "error") return "Not calculated (probe error)";
+  if (status === "not_tested" || status === null || status === undefined) {
+    return "Not calculated (not tested)";
+  }
+  return status;
+}
+
 async function openDetail(id) {
   try {
     const scan = await api(`/api/scans/${encodeURIComponent(id)}`);
     $("#detail-title").textContent = `${scan.hostname}:${scan.port}`;
     const scores = scan.scores || {};
+    const coveragePenalties = scores.coverage_penalties || {};
     const certificate = scan.certificate || {};
     const key = scan.key_exchange || {};
     const protocols = scan.protocols || {};
     const ciphers = scan.ciphers || {};
+    const protocolCoverage = scores.coverage?.protocol || {};
+    const cipherCoverage = ciphers.coverage || {};
+    const cipherInference = cipherCoverage.inference || {};
     const scoreCards = [
       ["Certificate", scores.certificate],
       ["Protocols", scores.protocol],
@@ -315,71 +446,28 @@ async function openDetail(id) {
     const findings = (scan.findings || []).map(finding => (
       `<div class="finding ${safe(finding.severity)}"><b>${safe(finding.title || finding.code)}</b><span>${safe(finding.detail || finding.message || "")}</span>${finding.remediation ? `<span>Fix: ${safe(finding.remediation)}</span>` : ""}</div>`
     )).join("") || '<p class="form-note">No findings recorded.</p>';
+    const legacyNotice = scan.assessment_version !== "2.3" || scan.evidence_schema_version !== 2 || scan.methodology_status === "legacy_methodology"
+      ? '<div class="legacy-notice"><b>Legacy methodology — rescan required</b><span>This record predates the current assessment contract and is retained for audit history only.</span></div>'
+      : "";
     $("#detail-content").innerHTML = `<div class="detail-body">
+      ${legacyNotice}
       <div class="score-cards">${scoreCards.map(([label, value]) => `<div class="mini-score"><b>${safe(value ?? "--")}</b><span>${label}</span></div>`).join("")}</div>
       <div class="evidence-grid">
         <section class="evidence-card"><h3>Certificate identity</h3>${valueRows({common_name:certificate.common_name,SAN_DNS:certificate.san_dns,issuer:certificate.issuer,serial_number:certificate.serial_number,SHA1_thumbprint:certificate.fingerprint_sha1,SHA256_thumbprint:certificate.fingerprint_sha256})}</section>
         <section class="evidence-card"><h3>Certificate assurance</h3>${valueRows({trusted:certificate.trust_valid,hostname_matches:certificate.hostname_valid,valid_from:certificate.not_before,valid_until:certificate.not_after,days_remaining:certificate.days_remaining,signature_algorithm:certificate.signature_algorithm,public_key:`${certificate.public_key_type || "--"} ${certificate.public_key_bits || ""}`,chain_complete:certificate.chain_complete,OCSP_stapling:certificate.ocsp_stapling,revocation_status:certificate.revocation_status,CT_SCTs:certificate.ct_sct_count})}</section>
-        <section class="evidence-card"><h3>Protocols</h3><div class="protocol-list">${Object.entries(protocols).map(([name, status]) => `<div class="protocol-item status-${safe(status)}"><b>${safe(name)}</b><span>${safe(status === "unsupported" || status === "not_supported" ? "not supported" : status === "error" ? "probe error" : status)}</span></div>`).join("") || "No protocol evidence"}</div></section>
+        <section class="evidence-card"><h3>Protocols</h3><div class="protocol-list">${Object.entries(protocols).map(([name, status]) => `<div class="protocol-item status-${safe(status)}"><b>${safe(name)}</b><span>${safe(protocolDisplay(status))}</span></div>`).join("") || "No protocol evidence"}</div>${valueRows({protocol_coverage: protocolCoverage.total_count ? `${protocolCoverage.calculated_count}/${protocolCoverage.total_count} checks (${protocolCoverage.percent}% weighted coverage)` : "Not recorded", not_calculated: protocolCoverage.not_calculated})}</section>
         <section class="evidence-card"><h3>Connection and key exchange</h3>${valueRows({key_exchange:key.method,key_bits:key.bits,forward_secrecy:key.forward_secrecy,minimum_DHE_bits:key.minimum_dhe_bits,maximum_DHE_bits:key.maximum_dhe_bits,observed_exchanges:key.observed,secure_renegotiation:scan.secure_renegotiation,compression:scan.compression,ALPN:scan.alpn})}</section>
-        <section class="evidence-card"><h3>Cipher inventory</h3>${valueRows({negotiated:ciphers.negotiated,negotiated_bits:ciphers.negotiated_bits,weakest_bits:ciphers.weakest_bits,strongest_bits:ciphers.strongest_bits,accepted:ciphers.accepted,accepted_details:ciphers.accepted_details,attempted:ciphers.attempted,enumeration_complete:ciphers.enumeration_complete})}</section>
+        <section class="evidence-card"><h3>Cipher inventory</h3>${valueRows({negotiated:ciphers.negotiated,negotiated_bits:ciphers.negotiated_bits,weakest_bits:ciphers.weakest_bits,strongest_bits:ciphers.strongest_bits,accepted:ciphers.accepted,accepted_details:ciphers.accepted_details,attempted:ciphers.attempted,enumeration_complete:ciphers.enumeration_complete,inferred_unsupported_count:cipherCoverage.inferred_unsupported_count || 0,inference:cipherInference.confidence === "inferred_not_definitive" ? "Repeated EOF inference (inferred, not definitive)" : cipherInference.confidence || "None",inference_attempts:cipherInference.attempts})}</section>
+        <section class="evidence-card"><h3>Coverage deductions</h3>${valueRows({certificate_trust_unknown:coveragePenalties.certificate_trust_unknown ?? 0,cipher:coveragePenalties.cipher ?? 0,DHE:coveragePenalties.dhe ?? 0})}<p class="form-note">Component points deducted because evidence coverage was incomplete.</p></section>
         <section class="evidence-card"><h3>Findings and remediation</h3><div class="finding-list">${findings}</div></section>
       </div>
       <section class="evidence-card"><h3>Raw OpenSSL evidence excerpt</h3><pre class="raw">${safe(typeof scan.raw_evidence === "object" ? JSON.stringify(scan.raw_evidence, null, 2) : scan.raw_evidence || "Not available.")}</pre></section>
-      <p class="form-note">Scanned ${safe(date(scan.scan_time))} / complete assessment / source ${safe(scan.source)} / ${safe((scan.errors || []).join("; ") || "no collection errors")}</p>
+      <p class="form-note">Scanned ${safe(date(scan.scan_time))} / complete assessment / source ${safe(scan.source)} / ${(scan.errors || []).length ? "collection limitations recorded; inspect raw evidence for diagnostics" : "no collection errors"}</p>
     </div>`;
     $("#detail-dialog").showModal();
   } catch (error) {
     toast(error.message, true);
   }
-}
-
-function parseCSV(text) {
-  const rows = [];
-  let row = [];
-  let field = "";
-  let quote = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index];
-    const next = text[index + 1];
-    if (character === '"' && quote && next === '"') {
-      field += '"';
-      index += 1;
-    } else if (character === '"') {
-      quote = !quote;
-    } else if (character === "," && !quote) {
-      row.push(field.trim());
-      field = "";
-    } else if ((character === "\n" || character === "\r") && !quote) {
-      if (character === "\r" && next === "\n") index += 1;
-      row.push(field.trim());
-      if (row.some(Boolean)) rows.push(row);
-      row = [];
-      field = "";
-    } else {
-      field += character;
-    }
-  }
-  row.push(field.trim());
-  if (row.some(Boolean)) rows.push(row);
-  if (!rows.length) return [];
-  const aliases = {host:"hostname", domain:"hostname", website:"hostname", url:"hostname"};
-  const headers = rows[0].map(value => {
-    const normalized = value.replace(/^\uFEFF/, "").toLowerCase().trim().replaceAll(" ", "_");
-    return aliases[normalized] || normalized;
-  });
-  const hasHostnameHeader = headers.includes("hostname");
-  if (!hasHostnameHeader) {
-    if (rows.some(values => values.slice(1).some(Boolean))) {
-      throw new Error("Use a one-column hostname list, or include a hostname column header");
-    }
-    return rows
-      .map(values => ({hostname:values[0].replace(/^\uFEFF/, "").trim(), country:"", sector:"", source:"one-column-csv"}))
-      .filter(target => target.hostname);
-  }
-  return rows.slice(1)
-    .map(values => Object.fromEntries(headers.map((header, index) => [header, values[index] || ""])))
-    .filter(target => target.hostname);
 }
 
 async function submitSingle(event) {
@@ -396,7 +484,7 @@ async function submitSingle(event) {
     toast(`Full assessment queued: ${data.job_id.slice(0, 8)}`);
     event.currentTarget.reset();
     event.currentTarget.port.value = 443;
-    refreshJobs();
+    await refreshJobs();
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -419,19 +507,20 @@ async function submitBatch() {
   } catch (error) {
     toast(error.message, true);
   } finally {
-    submitButton.disabled = state.jobs.some(job => ["queued","running"].includes(job.status)) || !state.batchTargets.length;
+    submitButton.disabled = state.jobs.some(job => ["queued","running","cancelling"].includes(job.status)) || !state.batchTargets.length;
     submitButton.textContent = originalLabel;
   }
 }
 
 function resetFileSelection() {
-  state.batchFileText = "";
   state.batchTargets = [];
   $("#csv-file").value = "";
   $("#file-confirm").classList.remove("ready", "error");
   $("#file-status-label").textContent = "WAITING FOR FILE";
   $("#file-name").textContent = "No CSV selected";
   $("#file-summary").textContent = "Choose a study file above.";
+  $("#file-validation").textContent = "";
+  $("#file-validation").classList.add("hidden");
   $("#start-batch").disabled = true;
 }
 
@@ -439,10 +528,10 @@ async function handleCsvFile(file) {
   if (!file) return;
   const confirmation = $("#file-confirm");
   try {
+    if (file.size > 20_000_000) throw new Error("CSV exceeds the 20 MB local request limit");
     const text = await file.text();
-    const targets = parseCSV(text);
-    if (!targets.length) throw new Error("The CSV contains no valid target rows");
-    state.batchFileText = text;
+    const parsed = window.CsvTargets.parseTargetCSV(text);
+    const targets = parsed.targets;
     state.batchTargets = targets;
     const groups = new Map();
     targets.forEach(target => {
@@ -455,7 +544,18 @@ async function handleCsvFile(file) {
     $("#file-status-label").textContent = "CSV READY TO RUN";
     $("#file-name").textContent = file.name;
     $("#file-summary").textContent = `${targets.length.toLocaleString("en-SG")} targets / ${(file.size / 1024).toFixed(1)} KB${groupSummary ? ` / ${groupSummary}` : ""}`;
-    $("#start-batch").disabled = state.jobs.some(job => ["queued","running"].includes(job.status));
+    const validation = [];
+    if (parsed.duplicates.length) validation.push(`${parsed.duplicates.length} duplicate row(s) removed`);
+    if (parsed.invalid.length) {
+      const examples = parsed.invalid.slice(0, 3).map(item => `line ${item.line}: ${item.reason}`).join("; ");
+      validation.push(`${parsed.invalid.length} invalid row(s) skipped (${examples})`);
+    }
+    if (parsed.ignoredHeaders.length) {
+      validation.push(`Ignored metadata column(s): ${parsed.ignoredHeaders.join(", ")}. Only hostname, country, sector, source and port are submitted.`);
+    }
+    $("#file-validation").textContent = validation.join(" / ");
+    $("#file-validation").classList.toggle("hidden", !validation.length);
+    $("#start-batch").disabled = state.jobs.some(job => ["queued","running","cancelling"].includes(job.status));
     toast(`${file.name} loaded successfully / ${targets.length.toLocaleString("en-SG")} targets`);
   } catch (error) {
     resetFileSelection();
@@ -516,10 +616,10 @@ function bindEvents() {
     event.preventDefault();
     navigate(element.dataset.route);
   }));
-  $("#refresh-all").addEventListener("click", () => refreshAll().then(() => toast("Local data refreshed")));
+  $("#refresh-all").addEventListener("click", () => refreshAll().then(() => toast("Local data refreshed")).catch(error => showDataError(error)));
   $("#single-form").addEventListener("submit", submitSingle);
   $("#start-batch").addEventListener("click", submitBatch);
-  $("#refresh-jobs").addEventListener("click", refreshJobs);
+  $("#refresh-jobs").addEventListener("click", () => refreshJobs().catch(error => showDataError(error)));
   $("#csv-file").addEventListener("change", event => handleCsvFile(event.target.files[0]));
   $("#change-file").addEventListener("click", () => $("#csv-file").click());
   const dropZone = $(".drop-zone");
@@ -532,9 +632,26 @@ function bindEvents() {
     dropZone.classList.remove("dragging");
   }));
   dropZone.addEventListener("drop", event => handleCsvFile(event.dataTransfer.files[0]));
-  ["#result-search","#filter-country","#filter-sector"].forEach(selector => (
-    $(selector).addEventListener(selector.includes("search") ? "input" : "change", renderResults)
-  ));
+  let searchTimer = null;
+  $("#result-search").addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      state.scansPage = 1;
+      refreshScans().catch(error => showDataError(error));
+    }, 250);
+  });
+  ["#filter-country", "#filter-sector"].forEach(selector => $(selector).addEventListener("change", () => {
+    state.scansPage = 1;
+    refreshScans().catch(error => showDataError(error));
+  }));
+  $("#results-prev").addEventListener("click", () => {
+    if (state.scansPage > 1) state.scansPage -= 1;
+    refreshScans().catch(error => showDataError(error));
+  });
+  $("#results-next").addEventListener("click", () => {
+    state.scansPage += 1;
+    refreshScans().catch(error => showDataError(error));
+  });
   $("#compare-field").addEventListener("change", updateCompareField);
   $("#group-a").addEventListener("change", updateComparisonGroups);
   $("#group-b").addEventListener("change", updateComparisonGroups);
@@ -547,11 +664,20 @@ function bindEvents() {
 
 bindEvents();
 navigate(location.hash.slice(1) || "overview");
-refreshAll();
-setInterval(() => {
-  if (state.jobs.some(job => ["queued","running"].includes(job.status))) {
-    refreshJobs();
-    refreshScans();
-    refreshAnalysis();
+refreshAll().catch(error => showDataError(error));
+setInterval(async () => {
+  if (state.pollInFlight || !state.jobs.some(job => ["queued","running","cancelling"].includes(job.status))) return;
+  state.pollInFlight = true;
+  try {
+    const previous = state.jobFingerprint;
+    await refreshJobs();
+    state.jobFingerprint = state.jobs.map(job => `${job.id}:${job.status}:${job.completed}:${job.failed}:${job.cancelled || 0}:${job.inconclusive || 0}`).join("|");
+    if (state.jobFingerprint !== previous) {
+      await Promise.all([refreshScans(), refreshRecent(), refreshAnalysis()]);
+    }
+  } catch (error) {
+    showDataError(error);
+  } finally {
+    state.pollInFlight = false;
   }
 }, 2500);

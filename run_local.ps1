@@ -14,17 +14,38 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     Write-Host 'First-time setup: creating the local Python environment...'
     $pythonLauncher = Get-Command py -ErrorAction SilentlyContinue
     if ($pythonLauncher) {
-        & py -3 -m venv $venvRoot
+        $created = $false
+        foreach ($version in @('3.13', '3.12', '3.11')) {
+            $versionOption = "-$version"
+            & py $versionOption -c 'import sys' 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                & py $versionOption -m venv $venvRoot
+                $created = $LASTEXITCODE -eq 0
+                if ($created) { break }
+            }
+        }
+        if (-not $created) { throw 'CPython 3.11, 3.12, or 3.13 is required.' }
     } else {
         $systemPython = Get-Command python -ErrorAction Stop
+        & $systemPython.Source -c 'import sys; sys.exit(0 if (3, 11) <= sys.version_info[:2] < (3, 14) else 1)'
+        if ($LASTEXITCODE -ne 0) { throw 'CPython 3.11, 3.12, or 3.13 is required.' }
         & $systemPython.Source -m venv $venvRoot
     }
     if ($LASTEXITCODE -ne 0) { throw 'Could not create the Python environment.' }
 }
 
+& $venvPython -c 'import sys; sys.exit(0 if (3, 11) <= sys.version_info[:2] < (3, 14) else 1)'
+if ($LASTEXITCODE -ne 0) {
+    throw 'The existing .venv uses an unsupported Python version. Recreate it with CPython 3.11, 3.12, or 3.13.'
+}
+
 $previousErrorAction = $ErrorActionPreference
 $ErrorActionPreference = 'SilentlyContinue'
-& $venvPython -c 'import cryptography' 2>$null
+$requirementLine = (Get-Content -LiteralPath (Join-Path $projectRoot 'requirements.txt')) |
+    Where-Object { $_ -match '^cryptography==' } |
+    Select-Object -First 1
+$requiredCryptography = ($requirementLine -split '==', 2)[1].Trim()
+& $venvPython -c "import importlib.metadata as metadata, sys; sys.exit(0 if metadata.version('cryptography') == sys.argv[1] else 1)" $requiredCryptography 2>$null
 $dependencyStatus = $LASTEXITCODE
 $ErrorActionPreference = $previousErrorAction
 if ($dependencyStatus -ne 0) {

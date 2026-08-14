@@ -9,6 +9,18 @@ from typing import Any
 from urllib.parse import urlparse
 
 
+CURRENT_ASSESSMENT_VERSION = "2.3"
+CURRENT_EVIDENCE_SCHEMA_VERSION = 2
+
+
+def is_current_methodology(value: dict[str, Any]) -> bool:
+    """Return whether evidence matches the complete current assessment contract."""
+    return (
+        value.get("assessment_version") == CURRENT_ASSESSMENT_VERSION
+        and value.get("evidence_schema_version") == CURRENT_EVIDENCE_SCHEMA_VERSION
+    )
+
+
 HOST_RE = re.compile(
     r"^(?=.{1,253}\.?$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
     r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.?$"
@@ -16,7 +28,9 @@ HOST_RE = re.compile(
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    # Microsecond precision keeps rapid rescans ordered while remaining ISO 8601
+    # and lexicographically sortable in SQLite and exported evidence.
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def normalize_host(value: str) -> str:
@@ -64,4 +78,3 @@ def json_dumps(value: Any) -> str:
 def ensure_directories(root: Path) -> None:
     for name in ("data", "exports", "logs"):
         (root / name).mkdir(parents=True, exist_ok=True)
-

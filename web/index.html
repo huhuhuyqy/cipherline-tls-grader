@@ -45,7 +45,7 @@
 
         <article id="overview-empty-guide" class="empty-onboarding hidden">
           <div class="onboarding-number">01</div>
-          <div><span class="eyebrow">START HERE</span><h2>No evidence has been collected yet.</h2><p>Upload either a one-column hostname list or a labelled CSV. Every target receives the complete assessment.</p></div>
+          <div><span class="eyebrow">START HERE</span><h2 id="overview-guide-title">No evidence has been collected yet.</h2><p id="overview-guide-body">Upload either a one-column hostname list or a labelled CSV. Every target receives the complete assessment.</p></div>
           <button class="btn primary" data-route="scan">Upload a CSV &rarr;</button>
         </article>
 
@@ -100,12 +100,12 @@
           </article>
 
           <article class="panel section-card">
-            <div class="section-head"><div><span class="eyebrow">RECOMMENDED / MANY TARGETS</span><h3>Upload CSV and collect</h3></div><span class="pill">NO ROW LIMIT</span></div>
-            <label class="drop-zone" for="csv-file"><span>+</span><b>Choose or drop a CSV file</b><small>Accepts a one-column hostname list with no header, or hostname/country/sector columns. The file stays local.</small></label>
+            <div class="section-head"><div><span class="eyebrow">RECOMMENDED / MANY TARGETS</span><h3>Upload CSV and collect</h3></div><span class="pill">CSV BATCH</span></div>
+            <label class="drop-zone" for="csv-file"><span>+</span><b>Choose or drop a CSV file</b><small>Accepts a one-column hostname list with no header, or hostname/country/sector columns, up to 20 MB. The file stays local.</small></label>
             <input id="csv-file" class="visually-hidden" type="file" accept=".csv,text/csv">
             <div id="file-confirm" class="file-confirm" aria-live="polite">
               <div class="file-status-icon">CSV</div>
-              <div class="file-confirm-copy"><span id="file-status-label">WAITING FOR FILE</span><strong id="file-name">No CSV selected</strong><small id="file-summary">Choose a study file above.</small></div>
+            <div class="file-confirm-copy"><span id="file-status-label">WAITING FOR FILE</span><strong id="file-name">No CSV selected</strong><small id="file-summary">Choose a study file above.</small><small id="file-validation" class="file-validation hidden"></small></div>
               <button class="text-btn" id="change-file" type="button">Choose file</button>
             </div>
             <div class="batch-footer"><span class="pill">FULL ASSESSMENT</span><button class="btn primary" id="start-batch" disabled>Run uploaded CSV &rarr;</button></div>
@@ -127,11 +127,16 @@
           <div class="evidence-hint"><span>OPEN A RESULT</span><p>Every row includes a direct prompt. Select a row to view certificate identity, protocols, ciphers, findings, remediation, and raw OpenSSL evidence.</p></div>
           <div class="filterbar evidence-filterbar">
             <input id="result-search" placeholder="Search hostname..." aria-label="Search hostname">
-            <select id="filter-country"><option value="">All countries</option></select>
-            <select id="filter-sector"><option value="">All sectors</option></select>
+            <select id="filter-country" aria-label="Filter evidence by country"><option value="">All countries</option></select>
+            <select id="filter-sector" aria-label="Filter evidence by sector"><option value="">All sectors</option></select>
           </div>
           <div class="table-wrap"><table class="data-table"><thead><tr><th>Target</th><th>Group</th><th>Certificate</th><th>Configuration</th><th>Overall</th><th>Grade</th><th>Scanned</th><th>Detailed evidence</th></tr></thead><tbody id="results-body"></tbody></table></div>
           <div id="results-empty" class="empty-state hidden">No matching evidence. Go to Scan lab and upload a CSV to begin.</div>
+          <nav class="pagination" aria-label="Evidence pages">
+            <button class="btn ghost" id="results-prev" type="button">Previous</button>
+            <span id="results-page-status" aria-live="polite">Page 1</span>
+            <button class="btn ghost" id="results-next" type="button">Next</button>
+          </nav>
         </article>
       </section>
 
@@ -163,15 +168,15 @@
         <div class="method-steps">
           <article class="panel"><span>01</span><h3>Define the dataset</h3><p>A hostname-only list supports descriptive analysis. Add country and sector columns when a grouped comparison is required.</p></article>
           <article class="panel"><span>02</span><h3>Collect full evidence</h3><p>Validate trust, expiry, revocation, and signatures; test TLS 1.3 through SSL 2.0; measure DHE and cipher strengths.</p></article>
-          <article class="panel"><span>03</span><h3>Score consistently</h3><p>Certificate quality contributes 40%; protocol, key exchange, and cipher strength form the 60% configuration score.</p></article>
+          <article class="panel"><span>03</span><h3>Score consistently</h3><p>Certificate quality contributes 40%; protocol, key exchange, and cipher strength form the 60% configuration score. Protocol checks without a definitive result are excluded. Partial cipher and DHE coverage receives proportional uncertainty deductions instead of suppressing the whole score.</p></article>
           <article class="panel"><span>04</span><h3>Build a comparison</h3><p>Select any two observed country or sector labels. The other label field is used as the stratification control.</p></article>
         </div>
         <div class="two-col equal">
-          <article class="panel section-card"><span class="eyebrow">SCORING MODEL</span><h3>100-point grade</h3><div class="score-model"><div><b>40</b><span>Certificate</span></div><div><b>21</b><span>Protocols</span></div><div><b>21</b><span>Key exchange</span></div><div><b>18</b><span>Ciphers</span></div></div><p class="form-note">Critical trust, expiry, revocation, and hostname failures cap the final grade. Findings and remediation remain attached to every result.</p></article>
+          <article class="panel section-card"><span class="eyebrow">SCORING MODEL</span><h3>100-point grade</h3><div class="score-model"><div><b>40</b><span>Certificate</span></div><div><b>21</b><span>Protocols</span></div><div><b>21</b><span>Key exchange</span></div><div><b>18</b><span>Ciphers</span></div></div><p class="form-note">Critical trust, expiry, revocation, and hostname failures cap the final grade. Unknown trust deducts 8 certificate points; incomplete cipher and DHE coverage deduct up to 30 and 25 component points proportionally. Findings and remediation remain attached to every result.</p></article>
           <article class="panel section-card"><span class="eyebrow">IMPORTANT INTERPRETATION</span><h3>SHA-1 fingerprint &ne; SHA-1 signature</h3><p>The SHA-1 fingerprint is only a certificate identifier. The signature algorithm is evaluated separately; an actual SHA-1 or MD5 signature is penalised.</p><p class="form-note">Results describe one point in time and one network location. CDN routing, transient failures, and inaccessible sites remain limitations.</p></article>
         </div>
         <article class="panel section-card requirement-coverage">
-          <div class="section-head"><div><span class="eyebrow">P3 REQUIREMENT COVERAGE</span><h3>Implementation checklist</h3></div><span class="pill">COMPLETE</span></div>
+          <div class="section-head"><div><span class="eyebrow">IMPLEMENTED FEATURES</span><h3>Technical capability checklist</h3></div><span class="pill">VERIFY WITH FINAL DATA</span></div>
           <div class="coverage-grid">
             <div><b>Certificate validity</b><span>CA trust / hostname / expiry / revocation / MD5 and SHA-1 signatures</span></div>
             <div><b>Protocol support</b><span>TLS 1.3 / 1.2 / 1.1 / 1.0 / SSL 3.0 / SSL 2.0</span></div>
@@ -189,11 +194,12 @@
   <datalist id="country-labels"></datalist>
   <datalist id="sector-labels"></datalist>
 
-  <dialog id="detail-dialog">
+  <dialog id="detail-dialog" aria-labelledby="detail-title">
     <div class="dialog-head"><div><span class="eyebrow">TLS EVIDENCE RECORD</span><h2 id="detail-title">Target</h2></div><button class="icon-btn" id="close-detail" aria-label="Close">&times;</button></div>
     <div id="detail-content"></div>
   </dialog>
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
+  <script src="/csv-parser.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

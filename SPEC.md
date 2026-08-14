@@ -1,10 +1,10 @@
 # CIPHERLINE Product Specification
 
-Status: implemented baseline, updated for the current local application.
+Status: implemented and regression-verified for CIPHERLINE v2.3.0 on 2026-08-13.
 
-Source requirements: `../Guidelines.pdf`, `../P3 - Tools Lab 1.pdf`, and the
-approved proposal documents in the parent folder. Architecture and function-level
-details are maintained in `CODE_MANUAL.md`.
+The implemented project requirements are summarised in this specification.
+Architecture and function-level details are maintained in `CODE_MANUAL.md`; the
+restricted course handouts are intentionally not included in the repository.
 
 ## Problem Statement
 
@@ -83,6 +83,14 @@ keeping research evidence, destructive actions, and unknown states unambiguous.
 46. As an assessor, I want a Method page mapping implementation to P3 requirements, so that coverage and scoring rationale are easy to verify.
 47. As an assessor, I want errors, unknowns, limitations, and the Singapore vantage point documented, so that conclusions remain appropriately bounded.
 48. As an assessor, I want concise graphs and statistics rather than unnecessary raw-data presentation, so that report quality follows the project guidelines.
+49. As a user, I want to cancel a long collection and resume from the last durable target, so that interruption does not discard completed work.
+50. As a user, I want interrupted jobs recovered after a restart, so that an unexpected shutdown has an explicit resumable state.
+51. As a researcher, I want current-method and legacy-method evidence visibly separated, so that incompatible observations are never mixed silently.
+52. As a researcher, I want lightweight server-side Evidence pagination and filtering, so that large datasets do not freeze the browser.
+53. As a user, I want full evidence loaded only after selecting a row, so that routine navigation remains responsive.
+54. As a security-conscious user, I want revocation URLs prevented from reaching private or loopback services, so that a scanned certificate cannot turn the local tool into an SSRF client.
+55. As a user, I want per-target deadlines and cooperative cancellation to bound network work, so that an unresponsive endpoint cannot block an entire collection indefinitely.
+56. As a researcher, I want a small bounded amount of target concurrency with ordered checkpoints, so that collection is faster without changing dataset ordering or resume semantics.
 
 ## Implementation Decisions
 
@@ -99,11 +107,54 @@ keeping research evidence, destructive actions, and unknown states unambiguous.
 - A completed observation uses the published 40/21/21/18 effective weighting and
   critical grade caps documented in the Method view.
 - Protocol support values preserve supported, unsupported, not tested, and error as
-  separate evidence states.
+  separate evidence states. Repeated raw SSL 2.0/3.0 rejection may be labelled
+  `inferred_unsupported`; it is disclosed as inference and never described as a
+  definitive modern-protocol pass.
+- A protocol value of `error` or `not_tested` is labelled `Not calculated` and
+  excluded from the protocol-score denominator. Remaining definitive checks are
+  re-normalised by their published protocol-risk weights, and protocol coverage is
+  disclosed in Evidence, CSV, and HTML. If no protocol check is definitive, the
+  protocol component itself is not calculated and the remaining configuration
+  components are re-normalised.
+- TLS 1.2 cipher coverage starts from every suite configurable by the local Python
+  SSL provider and uses iterative server-side elimination. Provider identities,
+  attempted candidates, indeterminate candidates, and coverage completeness remain
+  in evidence. Incomplete classification deducts up to 30 cipher-component points
+  in proportion to the unclassified candidate ratio instead of suppressing the
+  entire endpoint score.
+- Incomplete accepted-DHE parameter coverage similarly deducts up to 25
+  key-exchange-component points. Unknown certificate-chain trust deducts the
+  existing 8 certificate-component points. These uncertainty deductions are
+  structured findings with their numerator, denominator, and points.
+- After one or more suites negotiate, two consecutive fast EOF closures for the
+  unchanged remaining TLS 1.2 suite set classify that set as lower-confidence
+  `inferred_unsupported`. This is never triggered by a single EOF, timeout, reset,
+  or an endpoint that has not negotiated any candidate. The inference is disclosed
+  in stored evidence, the browser detail view, CSV, and HTML report.
+- Trust-chain validation, hostname identity, certificate dates, and revocation are
+  separate evidence dimensions. Expired/not-yet-valid certificates receive a
+  time-independent chain verification before a critical date grade is assigned.
+- Direct OCSP responses are downloaded through a deadline-aware, public-IP-pinned
+  client and then verified offline for responder signature, chain, return status,
+  and freshness. CRLs are checked for issuer, signature, validity window, size, and
+  serial number. Every redirect is revalidated and DNS answers containing a
+  non-public address are rejected.
 - Statistical comparison is entirely user-selected. Comparing countries controls
   for selected sectors; comparing sectors controls for selected countries.
 - The newest hostname/port observation is the only one used statistically. Older
   rows remain available as audit evidence.
+- Only the pair assessment version 2.3 plus evidence schema version 2 is admitted
+  to current analysis. Older or mismatched rows remain visible and exportable as
+  legacy evidence until rescanned.
+- The service accepts one collection job at a time. A bounded 1-4 target worker
+  pool (default 2) collects within that job, while a single coordinator persists
+  results and checkpoints in original input order.
+- A deterministic result ID derived from job ID and original target index makes
+  the result-save/checkpoint boundary idempotent across process failure and resume.
+- Evidence uses a lightweight paginated summary query; complete JSON is fetched
+  only for a selected result or the backward-compatible full-list API.
+- The HTTP service is loopback-only. State-changing requests require a health-issued
+  CSRF token, same-origin Host/Origin, and JSON content type.
 - The visual system uses platform system typography, layered translucent navigation,
   restrained depth, large readable targets, immediate press feedback, and calm
   critically damped transitions.
@@ -122,14 +173,25 @@ keeping research evidence, destructive actions, and unknown states unambiguous.
   completed/insecure targets.
 - Scanner integration tests use controlled local TLS endpoints and raw legacy
   protocol responses rather than public websites.
+- Scanner tests cover fixed-peer probing, complete cipher/DHE coverage, OpenSSL
+  cipher metadata, chain/date separation, legacy rejection inference, verified
+  OCSP/CRL semantics, safe redirect handling, DNS rebinding resistance, deadline,
+  and cancellation paths.
 - Analysis tests cover no default comparison, arbitrary labels, both comparison
   directions, sample thresholds, deduplication, and unlabelled descriptive analysis.
 - Reporting tests verify that failed rows never regain a numeric score in CSV or HTML.
+- Job/storage tests verify bounded overlap, ordered durable checkpoints, cancellation,
+  resume, crash recovery, revision monotonicity, and terminal-state race handling.
+- Server tests use a real temporary loopback HTTP server and verify CSRF, Host,
+  Origin, content type, stable error bodies, pagination, on-demand evidence, reset,
+  cancellation, and resume.
 - Web validation checks JavaScript syntax, referenced element IDs, English-only copy,
   responsive CSS rules, visible focus treatment, and accessibility preference media
   queries.
 - Existing tests are preferred over new internal seams; visual work must not require
   changes to core Python test fixtures.
+- The current regression baseline is 104 Python tests plus 22 Node.js frontend
+  contract/parser tests.
 
 ## Out of Scope
 
@@ -154,5 +216,5 @@ keeping research evidence, destructive actions, and unknown states unambiguous.
 - The P3 brief suggests at least 100 websites per category for significance. The
   application does not fabricate statistical readiness; it reports current cell counts
   and explicitly marks small samples preliminary.
-- See `README.md` for operation, `CODE_MANUAL.md` for implementation detail, and
-  `HANDOFF.md` for the latest continuation state.
+- See `README.md` for operation and `CODE_MANUAL.md` for implementation detail.
+  The completed study report and final dataset are maintained separately.

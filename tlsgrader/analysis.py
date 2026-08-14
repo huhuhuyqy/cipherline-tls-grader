@@ -5,6 +5,8 @@ import statistics
 from collections import Counter, defaultdict
 from typing import Any, Iterable
 
+from .utils import CURRENT_ASSESSMENT_VERSION, is_current_methodology
+
 
 LABEL_FIELDS = ("country", "sector")
 
@@ -154,11 +156,16 @@ def _bootstrap_stratified_difference(
     )
 
 
-def _deduplicate(scans: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
-    scans.sort(key=lambda scan: scan.get("scan_time", ""), reverse=True)
+def deduplicate_newest(scans: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Keep one target observation using timestamp then stable scan ID as recency."""
+    ordered = sorted(
+        scans,
+        key=lambda scan: (str(scan.get("scan_time", "")), str(scan.get("id", ""))),
+        reverse=True,
+    )
     usable = []
     seen_targets: set[tuple[str, int]] = set()
-    for scan in scans:
+    for scan in ordered:
         target_key = (
             str(scan.get("hostname", "")).lower().rstrip("."),
             int(scan.get("port", 443)),
@@ -167,7 +174,7 @@ def _deduplicate(scans: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int
             continue
         seen_targets.add(target_key)
         usable.append(scan)
-    return usable, len(scans) - len(usable)
+    return usable, len(ordered) - len(usable)
 
 
 def _labels(scans: list[dict[str, Any]], field: str) -> list[str]:
@@ -185,12 +192,19 @@ def analyse(
     group_b: str = "",
     strata: Iterable[str] | None = None,
 ) -> dict[str, Any]:
+    all_scans = list(scans)
+    legacy_methodology_count = sum(
+        not is_current_methodology(scan)
+        for scan in all_scans
+    )
     completed = [
         scan
-        for scan in scans
+        for scan in all_scans
         if scan.get("status") == "completed"
+        and is_current_methodology(scan)
+        and isinstance(scan.get("scores", {}).get("overall"), (int, float))
     ]
-    usable, duplicates_excluded = _deduplicate(completed)
+    usable, duplicates_excluded = deduplicate_newest(completed)
     available_labels = {field: _labels(usable, field) for field in LABEL_FIELDS}
     label_counts = {
         field: dict(
@@ -353,6 +367,9 @@ def analyse(
     return {
         "generated_from": "real",
         "total_collected": len(usable),
+        "total_records": len(all_scans),
+        "legacy_methodology_excluded": legacy_methodology_count,
+        "assessment_version": CURRENT_ASSESSMENT_VERSION,
         "unlabelled_observations": sum(
             not str(scan.get("country", "")).strip()
             or not str(scan.get("sector", "")).strip()

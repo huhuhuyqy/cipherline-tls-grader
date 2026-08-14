@@ -1,2 +1,2 @@
-cryptography>=45.0,<47
-
+# Runtime: CPython >=3.11,<3.14 (tested with CPython 3.11.15)
+cryptography==46.0.7

@@ -25,7 +25,20 @@ WEAK_CIPHER_MARKERS = (
     "IDEA",
     "MD5",
     "ANON",
+    "ADH",
+    "AECDH",
 )
+
+PROTOCOL_RULES = (
+    ("TLS 1.3", 10.0, "modern"),
+    ("TLS 1.2", 35.0, "modern"),
+    ("TLS 1.1", 25.0, "legacy"),
+    ("TLS 1.0", 30.0, "legacy"),
+    ("SSL 3.0", 45.0, "legacy"),
+    ("SSL 2.0", 60.0, "legacy"),
+)
+EXPECTED_PROTOCOLS = tuple(item[0] for item in PROTOCOL_RULES)
+NOT_SCORED_STATUSES = {"failed", "partial", "inconclusive", "cancelled"}
 
 
 def finding(severity: str, code: str, title: str, detail: str, remediation: str = "") -> dict[str, str]:
@@ -38,6 +51,15 @@ def finding(severity: str, code: str, title: str, detail: str, remediation: str 
     }
 
 
+def _incomplete_coverage_penalty(coverage: Any, maximum: float) -> tuple[float, int, int]:
+    if not isinstance(coverage, dict) or coverage.get("complete") is True:
+        return 0.0, 0, 0
+    candidates = max(0, int(coverage.get("candidate_count") or 0))
+    definitive = max(0, min(candidates, int(coverage.get("definitive_count") or 0)))
+    ratio = definitive / candidates if candidates else 0.0
+    return maximum * (1.0 - ratio), definitive, candidates
+
+
 def _certificate_score(scan: dict[str, Any], findings: list[dict[str, str]]) -> float:
     cert = scan.get("certificate", {})
     score = 100.0
@@ -47,6 +69,15 @@ def _certificate_score(scan: dict[str, Any], findings: list[dict[str, str]]) -> 
         findings.append(finding("critical", "CERT_UNTRUSTED", "Certificate chain is not trusted", cert.get("trust_error", "Trust validation failed"), "Install a complete chain issued by a trusted public CA."))
     elif cert.get("trust_valid") is True:
         findings.append(finding("pass", "CERT_TRUSTED", "Certificate chain is trusted", "The chain validated against the recorded local trust store."))
+    elif cert.get("trust_state") == "validity_failed":
+        findings.append(
+            finding(
+                "info",
+                "CERT_VALIDITY_VERIFY_FAILURE",
+                "Certificate validation stopped at the validity check",
+                "The verifier reported an expired or not-yet-valid certificate; this is scored by the separate validity finding and is not labelled as an untrusted chain.",
+            )
+        )
     else:
         score -= 8
         findings.append(finding("warning", "CERT_TRUST_UNKNOWN", "Certificate trust could not be confirmed", "The trust check did not produce a definitive result."))
@@ -109,7 +140,7 @@ def _certificate_score(scan: dict[str, Any], findings: list[dict[str, str]]) -> 
     if cert.get("chain_complete") is False:
         score -= 5
         findings.append(finding("warning", "CHAIN_INCOMPLETE", "Certificate chain may be incomplete", "Only the leaf certificate was observed or verification reported a missing issuer.", "Serve the required intermediate certificates."))
-    if cert.get("ocsp_stapling") is True:
+    if cert.get("ocsp_stapling_verified") is True:
         findings.append(finding("pass", "OCSP_STAPLED", "OCSP stapling is enabled", "The server supplied a stapled certificate-status response."))
     elif cert.get("ocsp_uri"):
         findings.append(finding("info", "OCSP_NOT_STAPLED", "OCSP stapling was not observed", "The certificate publishes an OCSP responder but no stapled response was detected."))
@@ -117,41 +148,77 @@ def _certificate_score(scan: dict[str, Any], findings: list[dict[str, str]]) -> 
     return clamp(score)
 
 
-def _protocol_score(scan: dict[str, Any], findings: list[dict[str, str]]) -> float:
+def _protocol_score(
+    scan: dict[str, Any], findings: list[dict[str, str]]
+) -> tuple[float | None, dict[str, Any]]:
     protocols = scan.get("protocols", {})
-    score = 100.0
     supported = {name for name, state in protocols.items() if state == "supported"}
-    expected = {"TLS 1.3", "TLS 1.2", "TLS 1.1", "TLS 1.0", "SSL 3.0", "SSL 2.0"}
-    incomplete = sorted(name for name in expected if protocols.get(name) in {None, "not_tested", "error"})
+    inferred_unsupported = sorted(name for name, state in protocols.items() if state == "inferred_unsupported")
+    calculated = [
+        name for name, _penalty, _kind in PROTOCOL_RULES
+        if protocols.get(name) in {"supported", "unsupported", "not_supported", "inferred_unsupported"}
+    ]
+    not_calculated = [name for name in EXPECTED_PROTOCOLS if name not in calculated]
+    total_weight = sum(penalty for _name, penalty, _kind in PROTOCOL_RULES)
+    calculated_weight = sum(
+        penalty for name, penalty, _kind in PROTOCOL_RULES if name in calculated
+    )
+    observed_deduction = 0.0
 
-    if "TLS 1.3" not in supported:
-        score -= 10
+    if "TLS 1.3" in calculated and "TLS 1.3" not in supported:
+        observed_deduction += 10
         findings.append(finding("warning", "NO_TLS13", "TLS 1.3 was not detected", "TLS 1.3 should be preferred when operationally possible.", "Enable TLS 1.3 while retaining secure TLS 1.2 compatibility if required."))
-    else:
+    elif "TLS 1.3" in supported:
         findings.append(finding("pass", "TLS13", "TLS 1.3 is supported", "The newest tested TLS version negotiated successfully."))
-    if "TLS 1.2" not in supported:
-        score -= 35
+    if "TLS 1.2" in calculated and "TLS 1.2" not in supported:
+        observed_deduction += 35
         findings.append(finding("critical", "NO_TLS12", "TLS 1.2 was not detected", "The service lacks the broadly required modern compatibility baseline."))
     for version, deduction in (("TLS 1.1", 25), ("TLS 1.0", 30), ("SSL 3.0", 45), ("SSL 2.0", 60)):
         if version in supported:
-            score -= deduction
+            observed_deduction += deduction
             findings.append(finding("critical" if version.startswith("SSL") else "warning", "LEGACY_" + version.replace(" ", "").replace(".", ""), f"Obsolete protocol enabled: {version}", "Legacy protocols expose clients to known weaknesses and downgrade risk.", f"Disable {version}."))
-    if supported and supported.issubset({"TLS 1.2", "TLS 1.3"}) and not incomplete:
+    if supported and supported.issubset({"TLS 1.2", "TLS 1.3"}) and not not_calculated and not inferred_unsupported:
         findings.append(finding("pass", "PROTOCOL_MODERN", "Only modern tested TLS versions are enabled", ", ".join(sorted(supported))))
-    elif incomplete:
+    elif not_calculated:
         findings.append(
             finding(
                 "info",
-                "PROTOCOL_COVERAGE_INCOMPLETE",
-                "Protocol coverage is incomplete",
-                "No definitive result for: " + ", ".join(incomplete),
-                "Retry from a stable network before using this result for formal comparison.",
+                "PROTOCOL_CHECKS_NOT_CALCULATED",
+                "Some protocol checks were not calculated",
+                "No definitive result; excluded from the protocol score: " + ", ".join(not_calculated),
+                "Retry from a stable network to increase protocol-score coverage.",
             )
         )
-    if not supported:
-        score = 0
+    if inferred_unsupported:
+        findings.append(
+            finding(
+                "info",
+                "PROTOCOL_REJECTION_INFERRED",
+                "Legacy protocol rejection was inferred",
+                "Repeated post-ClientHello rejection, without a definitive protocol alert, for: " + ", ".join(inferred_unsupported),
+            )
+        )
+    no_protocol = not supported and bool(calculated) and not not_calculated
+    if no_protocol:
         findings.append(finding("critical", "NO_PROTOCOL", "No tested TLS protocol negotiated", "The endpoint was unreachable or incompatible with the probe."))
-    return clamp(score)
+    score = (
+        clamp(100.0 - observed_deduction * total_weight / calculated_weight)
+        if calculated_weight > 0
+        else None
+    )
+    if no_protocol:
+        score = 0.0
+    coverage = {
+        "calculated": calculated,
+        "not_calculated": not_calculated,
+        "calculated_count": len(calculated),
+        "total_count": len(EXPECTED_PROTOCOLS),
+        "calculated_weight": round(calculated_weight, 1),
+        "total_weight": round(total_weight, 1),
+        "percent": round(calculated_weight / total_weight * 100, 1) if total_weight else 0.0,
+        "partial": bool(not_calculated),
+    }
+    return score, coverage
 
 
 def _key_exchange_score(scan: dict[str, Any], findings: list[dict[str, str]]) -> float:
@@ -160,6 +227,19 @@ def _key_exchange_score(scan: dict[str, Any], findings: list[dict[str, str]]) ->
     method = (key.get("method") or "unknown").upper()
     bits = key.get("bits")
     fs = key.get("forward_secrecy")
+    suite_details = [
+        item for item in scan.get("ciphers", {}).get("accepted_details", [])
+        if isinstance(item, dict)
+    ]
+    static_rsa = [
+        item.get("name", "unknown") for item in suite_details
+        if str(item.get("key_exchange", "")).upper() in {"RSA", "STATIC RSA"}
+    ]
+    anonymous = [
+        item.get("name", "unknown") for item in suite_details
+        if str(item.get("authentication", "")).upper() in {"NONE", "ANONYMOUS", "NULL"}
+        or str(item.get("name", "")).upper().startswith(("ADH-", "AECDH-"))
+    ]
 
     if fs is True:
         findings.append(finding("pass", "FORWARD_SECRECY", "Forward secrecy is supported", method))
@@ -184,9 +264,42 @@ def _key_exchange_score(scan: dict[str, Any], findings: list[dict[str, str]]) ->
             findings.append(finding("pass", "DHE_4096", "Finite-field DH key is very strong", f"Minimum accepted DHE strength: {assessed_dhe_bits} bits"))
         else:
             findings.append(finding("pass", "DHE_ACCEPTABLE", "Finite-field DH key meets the baseline", f"Minimum {assessed_dhe_bits} bits; maximum {maximum_dhe_bits or assessed_dhe_bits} bits"))
-    if method in {"RSA", "STATIC RSA"}:
+    if anonymous:
+        score -= 60
+        findings.append(
+            finding(
+                "critical",
+                "ANONYMOUS_CIPHER",
+                "Anonymous TLS authentication was accepted",
+                ", ".join(anonymous[:12]),
+                "Disable anonymous DH/ECDH cipher suites.",
+            )
+        )
+    if static_rsa or method in {"RSA", "STATIC RSA"}:
         score -= 25
-        findings.append(finding("warning", "STATIC_RSA", "Static RSA key exchange detected", "Static RSA does not provide forward secrecy."))
+        findings.append(
+            finding(
+                "warning",
+                "STATIC_RSA",
+                "Static RSA key exchange was accepted",
+                ", ".join(static_rsa[:12]) if static_rsa else "The negotiated suite uses static RSA.",
+                "Disable static RSA suites and retain ephemeral ECDHE/DHE suites.",
+            )
+        )
+    coverage_penalty, definitive, candidates = _incomplete_coverage_penalty(
+        key.get("dhe_coverage"), 25.0
+    )
+    if coverage_penalty:
+        score -= coverage_penalty
+        findings.append(
+            finding(
+                "warning",
+                "DHE_COVERAGE_PARTIAL",
+                "DHE parameter coverage is incomplete",
+                f"{definitive}/{candidates} accepted-DHE candidates produced definitive parameter evidence; {coverage_penalty:.1f} points deducted from the key-exchange component.",
+                "Retry the assessment from a stable network to improve DHE coverage.",
+            )
+        )
     return clamp(score)
 
 
@@ -194,9 +307,35 @@ def _cipher_score(scan: dict[str, Any], findings: list[dict[str, str]]) -> float
     cipher_data = scan.get("ciphers", {})
     accepted = list(dict.fromkeys(cipher_data.get("accepted", []) + ([cipher_data.get("negotiated")] if cipher_data.get("negotiated") else [])))
     score = 100.0
-    weak = [name for name in accepted if any(marker in name.upper() for marker in WEAK_CIPHER_MARKERS)]
-    cbc = [name for name in accepted if "CBC" in name.upper()]
     details = cipher_data.get("accepted_details", [])
+    metadata = {
+        str(item.get("name")): item
+        for item in details
+        if isinstance(item, dict) and item.get("name")
+    }
+
+    def is_cbc(name: str) -> bool:
+        item = metadata.get(name, {})
+        symmetric = str(item.get("symmetric", "")).lower()
+        if symmetric.endswith("-cbc") or "cbc" in symmetric or "CBC" in name.upper():
+            return True
+        upper = name.upper()
+        return (
+            any(prefix in upper for prefix in ("AES", "CAMELLIA", "ARIA", "SEED"))
+            and "-SHA" in upper
+            and not any(mode in upper for mode in ("GCM", "CCM", "CHACHA20"))
+        )
+
+    def is_weak(name: str) -> bool:
+        item = metadata.get(name, {})
+        authentication = str(item.get("authentication", "")).upper()
+        return (
+            any(marker in name.upper() for marker in WEAK_CIPHER_MARKERS)
+            or authentication in {"NONE", "ANONYMOUS", "NULL"}
+        )
+
+    weak = [name for name in accepted if is_weak(name)]
+    cbc = [name for name in accepted if is_cbc(name)]
     strengths = [int(item["bits"]) for item in details if isinstance(item, dict) and isinstance(item.get("bits"), int)]
     if not strengths and isinstance(cipher_data.get("negotiated_bits"), int):
         strengths = [int(cipher_data["negotiated_bits"])]
@@ -222,7 +361,7 @@ def _cipher_score(scan: dict[str, Any], findings: list[dict[str, str]]) -> float
         findings.append(finding("pass", "CIPHER_256_PLUS", "All measured ciphers provide at least 256-bit strength", f"Measured range: {min(strengths)}-{max(strengths)} bits"))
     elif strengths and min(strengths) >= 128:
         findings.append(finding("pass", "CIPHER_128_BASELINE", "All measured ciphers meet the 128-bit baseline", f"Measured range: {min(strengths)}-{max(strengths)} bits"))
-    if accepted and not weak and not cbc and not below_128:
+    if accepted and not weak and not cbc and not below_128 and cipher_data.get("enumeration_complete") is not False:
         findings.append(finding("pass", "CIPHERS_MODERN", "Observed cipher suites are modern", ", ".join(accepted[:8])))
     if not accepted:
         score -= 20
@@ -232,6 +371,22 @@ def _cipher_score(scan: dict[str, Any], findings: list[dict[str, str]]) -> float
         findings.append(finding("warning", "TLS_COMPRESSION", "TLS compression is enabled", "TLS-level compression can enable information leakage attacks.", "Disable TLS compression."))
     elif scan.get("compression") is False:
         findings.append(finding("pass", "NO_COMPRESSION", "TLS compression is disabled", "Compression: NONE"))
+    coverage_penalty, definitive, candidates = _incomplete_coverage_penalty(
+        cipher_data.get("coverage"), 30.0
+    )
+    if cipher_data.get("enumeration_complete") is not True and not isinstance(cipher_data.get("coverage"), dict):
+        coverage_penalty, definitive, candidates = 30.0, 0, 0
+    if coverage_penalty:
+        score -= coverage_penalty
+        findings.append(
+            finding(
+                "warning",
+                "CIPHER_COVERAGE_PARTIAL",
+                "TLS 1.2 cipher coverage is incomplete",
+                f"{definitive}/{candidates} candidates received a definitive classification; {coverage_penalty:.1f} points deducted from the cipher component.",
+                "Retry the assessment from a stable network to improve cipher coverage.",
+            )
+        )
     return clamp(score)
 
 
@@ -244,7 +399,8 @@ def grade_for(score: float, cap: str | None = None) -> str:
 
 def score_scan(scan: dict[str, Any], weights: dict[str, float] | None = None) -> dict[str, Any]:
     weights = {**DEFAULT_WEIGHTS, **(weights or {})}
-    if scan.get("status") == "failed":
+    status = scan.get("status")
+    if status in NOT_SCORED_STATUSES:
         result = deepcopy(scan)
         detail = "; ".join(str(item) for item in scan.get("errors", []) if item) or "The TLS assessment did not complete."
         result["scores"] = {
@@ -268,14 +424,34 @@ def score_scan(scan: dict[str, Any], weights: dict[str, float] | None = None) ->
                 "Confirm the hostname, DNS resolution, network reachability, and HTTPS availability, then retry.",
             )
         ]
-        result["recommendation"] = "Retry the target after resolving the collection error; no security grade was assigned."
+        result["recommendation"] = "Retry the target after resolving the collection or coverage error; no security grade was assigned."
         return result
     findings: list[dict[str, str]] = []
     certificate = _certificate_score(scan, findings)
-    protocol = _protocol_score(scan, findings)
+    protocol, protocol_coverage = _protocol_score(scan, findings)
     key_exchange = _key_exchange_score(scan, findings)
     cipher = _cipher_score(scan, findings)
-    configuration = protocol * weights["protocol"] + key_exchange * weights["key_exchange"] + cipher * weights["cipher"]
+    cipher_coverage_penalty, _cipher_definitive, _cipher_candidates = _incomplete_coverage_penalty(
+        scan.get("ciphers", {}).get("coverage"), 30.0
+    )
+    if scan.get("ciphers", {}).get("enumeration_complete") is not True and not isinstance(
+        scan.get("ciphers", {}).get("coverage"), dict
+    ):
+        cipher_coverage_penalty = 30.0
+    dhe_coverage_penalty, _dhe_definitive, _dhe_candidates = _incomplete_coverage_penalty(
+        scan.get("key_exchange", {}).get("dhe_coverage"), 25.0
+    )
+    configuration_components = [
+        (protocol, weights["protocol"]),
+        (key_exchange, weights["key_exchange"]),
+        (cipher, weights["cipher"]),
+    ]
+    available_configuration_weight = sum(
+        weight for value, weight in configuration_components if value is not None
+    )
+    configuration = sum(
+        value * weight for value, weight in configuration_components if value is not None
+    ) / available_configuration_weight
     overall = certificate * weights["certificate"] + configuration * weights["configuration"]
 
     cert = scan.get("certificate", {})
@@ -293,7 +469,7 @@ def score_scan(scan: dict[str, Any], weights: dict[str, float] | None = None) ->
     result = deepcopy(scan)
     result["scores"] = {
         "certificate": round(certificate, 1),
-        "protocol": round(protocol, 1),
+        "protocol": round(protocol, 1) if protocol is not None else None,
         "key_exchange": round(key_exchange, 1),
         "cipher": round(cipher, 1),
         "configuration": round(configuration, 1),
@@ -301,6 +477,12 @@ def score_scan(scan: dict[str, Any], weights: dict[str, float] | None = None) ->
         "grade": grade_for(overall, cap),
         "grade_cap": cap,
         "weights": weights,
+        "coverage": {"protocol": protocol_coverage},
+        "coverage_penalties": {
+            "certificate_trust_unknown": 8.0 if scan.get("certificate", {}).get("trust_valid") is None else 0.0,
+            "cipher": round(cipher_coverage_penalty, 1),
+            "dhe": round(dhe_coverage_penalty, 1),
+        },
     }
     result["findings"] = findings
     result["recommendation"] = (
