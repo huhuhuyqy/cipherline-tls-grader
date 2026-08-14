@@ -2,9 +2,43 @@ __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
-data/tls_grader.db
-exports/*.html
-exports/*.csv
-exports/*.json
-logs/*.log
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.browser-smoke/
+tmp/
+temp/
+exports/
+logs/
+
+# Local evidence and SQLite sidecars must never be published.
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Local secrets and certificate material.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# OS/editor residue. The checked-in VS Code tasks are intentional.
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*.bak
+
 tls-results.csv
+
+# Private study artifacts retained locally only.
+tests/
+data/tls_sites_expanded_multisector.csv
+docs/TLS_Grader_Final_Technical_Report.docx

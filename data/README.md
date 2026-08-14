@@ -1,18 +1,19 @@
 # Sampling data
 
-Use `candidates_template.csv` as the import format. Replace every placeholder with a manually verified target and retain the directory or page used to identify it in `source`.
+`candidates_template.csv` documents the supported labelled import format.
+Replace its examples with manually verified targets and retain the directory or
+page used to identify each endpoint in the `source` column.
 
-`tls_sites_200_balanced.csv` is the prepared research candidate list. It contains 50 rows in each of the four strata and can be imported directly in **Scan lab → Batch collection**. Re-check eligibility and accessibility before the final collection date; an unreachable candidate should be documented rather than silently replaced after seeing its score.
+`tls_sites_pilot_4.csv` is a four-site smoke-test list for checking the complete
+batch workflow before a long collection.
 
-`tls_sites_400_balanced.csv` is the expanded candidate list. It preserves all 200 targets above and adds 50 new targets to every stratum, giving 100 rows per stratum and 400 unique hostnames in total. The added Singapore school rows come from the 2026 MOE dataset on data.gov.sg; government and Chinese university targets retain their official directory sources in the `source` column.
+The CSV is an input list, not scan evidence and not a claim that every endpoint
+is reachable. Eligibility was determined before observing TLS grades. Preserve
+unreachable results instead of replacing them after seeing the outcome.
 
-Use `tls_sites_pilot_4.csv` after a fresh restart to verify the complete batch path with one target from each stratum before submitting all 200 candidates.
+The final study dataset is maintained locally and intentionally excluded from
+the repository.
 
-The final study requires 50 valid observations in each stratum:
-
-- China — Government
-- China — Education
-- Singapore — Government
-- Singapore — Education
-
-Eligibility must be determined before TLS scanning. Record redirects and unreachable hosts instead of silently substituting them.
+The repository does not publish `tls_grader.db`, exported evidence, raw OpenSSL
+output, or logs. Those files may contain timestamps, resolved peer addresses,
+certificate details, and operational diagnostics and remain local by default.

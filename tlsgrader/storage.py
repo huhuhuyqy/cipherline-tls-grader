@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 import threading
@@ -9,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from .utils import json_dumps, utc_now_iso
+from .utils import is_current_methodology, json_dumps, utc_now_iso
 
 
 class Storage:
@@ -47,6 +46,10 @@ class Storage:
             scan_time TEXT NOT NULL,
             overall_score REAL NOT NULL DEFAULT 0,
             grade TEXT NOT NULL DEFAULT 'F',
+            certificate_score REAL,
+            configuration_score REAL,
+            assessment_version TEXT NOT NULL DEFAULT '',
+            evidence_schema_version INTEGER,
             data_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_scans_time ON scans(scan_time DESC);
@@ -71,12 +74,42 @@ class Storage:
             value_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            integer_value INTEGER NOT NULL
+        );
         """
         with self.connect() as connection:
             connection.executescript(schema)
+            connection.execute(
+                "INSERT OR IGNORE INTO metadata (key, integer_value) VALUES ('analysis_revision', 0)"
+            )
             scan_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(scans)").fetchall()
             }
+            for name, definition in {
+                "certificate_score": "REAL",
+                "configuration_score": "REAL",
+                "assessment_version": "TEXT NOT NULL DEFAULT ''",
+                "evidence_schema_version": "INTEGER",
+            }.items():
+                if name not in scan_columns:
+                    connection.execute(f"ALTER TABLE scans ADD COLUMN {name} {definition}")
+            job_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            for name, definition in {
+                "cancelled": "INTEGER NOT NULL DEFAULT 0",
+                "inconclusive": "INTEGER NOT NULL DEFAULT 0",
+                "next_index": "INTEGER NOT NULL DEFAULT 0",
+                "first_error_code": "TEXT NOT NULL DEFAULT ''",
+                "current_error_code": "TEXT NOT NULL DEFAULT ''",
+                "first_error": "TEXT NOT NULL DEFAULT ''",
+                "current_error": "TEXT NOT NULL DEFAULT ''",
+                "diagnostic": "TEXT NOT NULL DEFAULT ''",
+            }.items():
+                if name not in job_columns:
+                    connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
             if "is_demo" in scan_columns:
                 connection.execute("DELETE FROM scans WHERE is_demo = 1")
                 connection.execute("ALTER TABLE scans DROP COLUMN is_demo")
@@ -94,17 +127,26 @@ class Storage:
             )
             connection.execute("PRAGMA optimize")
 
-    def analysis_revision(self) -> str:
-        """Return a compact fingerprint of columns that can change analysis output."""
+    @staticmethod
+    def _decorate_scan(data: dict[str, Any]) -> dict[str, Any]:
+        data["methodology_status"] = (
+            "current" if is_current_methodology(data) else "legacy_methodology"
+        )
+        return data
+
+    @staticmethod
+    def _bump_analysis_revision(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "UPDATE metadata SET integer_value = integer_value + 1 WHERE key = 'analysis_revision'"
+        )
+
+    def analysis_revision(self) -> int:
+        """Return the transactionally maintained analysis/evidence revision."""
         with self.connect() as connection:
-            rows = connection.execute(
-                """SELECT id, scan_time, country, sector, status, overall_score
-                   FROM scans ORDER BY id"""
-            ).fetchall()
-        digest = hashlib.sha256()
-        for row in rows:
-            digest.update(json_dumps(tuple(row)).encode("utf-8"))
-        return digest.hexdigest()
+            row = connection.execute(
+                "SELECT integer_value FROM metadata WHERE key = 'analysis_revision'"
+            ).fetchone()
+        return int(row[0])
 
     def save_scan(self, result: dict[str, Any]) -> str:
         scan_id = result.get("id") or str(uuid.uuid4())
@@ -122,6 +164,10 @@ class Storage:
             result.get("scan_time", utc_now_iso()),
             float(overall) if isinstance(overall, (int, float)) else 0.0,
             scores.get("grade") or "N/A",
+            scores.get("certificate") if isinstance(scores.get("certificate"), (int, float)) else None,
+            scores.get("configuration") if isinstance(scores.get("configuration"), (int, float)) else None,
+            str(result.get("assessment_version") or ""),
+            result.get("evidence_schema_version") if isinstance(result.get("evidence_schema_version"), int) else None,
             json_dumps(result),
         )
         with self._write_lock, self.connect() as connection:
@@ -129,11 +175,13 @@ class Storage:
                 """
                 INSERT OR REPLACE INTO scans
                 (id, hostname, port, country, sector, source, status, scan_time,
-                 overall_score, grade, data_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 overall_score, grade, certificate_score, configuration_score,
+                 assessment_version, evidence_schema_version, data_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 row,
             )
+            self._bump_analysis_revision(connection)
         return scan_id
 
     def list_scans(
@@ -164,8 +212,95 @@ class Storage:
         items = []
         for row in rows:
             data = json.loads(row["data_json"])
-            items.append(data)
+            items.append(self._decorate_scan(data))
         return items
+
+    def list_scan_summaries(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        country: str = "",
+        sector: str = "",
+        search: str = "",
+    ) -> dict[str, Any]:
+        """Return lightweight scan rows and page metadata without parsing evidence JSON."""
+        limit = max(1, min(int(limit), 1000))
+        offset = max(0, int(offset))
+        conditions: list[str] = []
+        parameters: list[Any] = []
+        if country:
+            conditions.append("country = ?")
+            parameters.append(country)
+        if sector:
+            conditions.append("sector = ?")
+            parameters.append(sector)
+        if search:
+            conditions.append("hostname LIKE ?")
+            parameters.append(f"%{search}%")
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        with self.connect() as connection:
+            total = int(connection.execute(f"SELECT COUNT(*) FROM scans{where}", parameters).fetchone()[0])
+            rows = connection.execute(
+                f"""SELECT id, hostname, port, country, sector, source, status, scan_time,
+                           overall_score, grade, certificate_score, configuration_score,
+                           assessment_version, evidence_schema_version
+                    FROM scans{where} ORDER BY scan_time DESC LIMIT ? OFFSET ?""",
+                [*parameters, limit, offset],
+            ).fetchall()
+            countries = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT DISTINCT country FROM scans WHERE country <> '' ORDER BY country COLLATE NOCASE"
+                ).fetchall()
+            ]
+            sectors = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT DISTINCT sector FROM scans WHERE sector <> '' ORDER BY sector COLLATE NOCASE"
+                ).fetchall()
+            ]
+        items = []
+        for row in rows:
+            version = row["assessment_version"] or None
+            items.append(
+                {
+                    "id": row["id"],
+                    "hostname": row["hostname"],
+                    "port": row["port"],
+                    "country": row["country"],
+                    "sector": row["sector"],
+                    "source": row["source"],
+                    "status": row["status"],
+                    "scan_time": row["scan_time"],
+                    "scores": {
+                        "overall": row["overall_score"] if row["status"] == "completed" else None,
+                        "grade": row["grade"],
+                        "certificate": row["certificate_score"],
+                        "configuration": row["configuration_score"],
+                    },
+                    "assessment_version": version,
+                    "evidence_schema_version": row["evidence_schema_version"],
+                    "methodology_status": (
+                        "current"
+                        if is_current_methodology(
+                            {
+                                "assessment_version": version,
+                                "evidence_schema_version": row["evidence_schema_version"],
+                            }
+                        )
+                        else "legacy_methodology"
+                    ),
+                }
+            )
+        return {
+            "items": items,
+            "count": len(items),
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "available_labels": {"country": countries, "sector": sectors},
+        }
 
     def get_scan(self, scan_id: str) -> dict[str, Any] | None:
         with self.connect() as connection:
@@ -173,17 +308,21 @@ class Storage:
         if not row:
             return None
         data = json.loads(row["data_json"])
-        return data
+        return self._decorate_scan(data)
 
     def delete_scan(self, scan_id: str) -> bool:
         with self._write_lock, self.connect() as connection:
             cursor = connection.execute("DELETE FROM scans WHERE id = ?", (scan_id,))
+            if cursor.rowcount:
+                self._bump_analysis_revision(connection)
         return cursor.rowcount > 0
 
     def clear_scans(self) -> int:
         query = "DELETE FROM scans"
         with self._write_lock, self.connect() as connection:
             cursor = connection.execute(query)
+            if cursor.rowcount:
+                self._bump_analysis_revision(connection)
         return cursor.rowcount
 
     def reset_all(self) -> dict[str, int]:
@@ -197,6 +336,8 @@ class Storage:
             connection.execute("DELETE FROM scans")
             connection.execute("DELETE FROM jobs")
             connection.execute("DELETE FROM settings")
+            if counts["scans"]:
+                self._bump_analysis_revision(connection)
         return counts
 
     def recover_interrupted_jobs(self) -> int:
@@ -205,10 +346,10 @@ class Storage:
             cursor = connection.execute(
                 """UPDATE jobs
                    SET status = 'interrupted',
-                       message = 'Interrupted by a server stop or restart; submit this batch again',
+                       message = 'Interrupted by a server stop or restart; resume from the saved checkpoint',
                        current_target = '',
                        updated_at = ?
-                   WHERE status IN ('queued', 'running')""",
+                   WHERE status IN ('queued', 'running', 'cancelling')""",
                 (utc_now_iso(),),
             )
         return cursor.rowcount
@@ -227,12 +368,17 @@ class Storage:
         return job_id
 
     def update_job(self, job_id: str, **changes: Any) -> None:
-        allowed = {"status", "completed", "failed", "current_target", "message", "result_ids_json"}
+        allowed = {
+            "status", "completed", "failed", "cancelled", "inconclusive", "next_index",
+            "first_error_code", "current_error_code", "diagnostic", "current_target", "message",
+            "first_error", "current_error",
+            "result_ids_json", "payload_json",
+        }
         fields, values = [], []
         for key, value in changes.items():
             if key in allowed:
                 fields.append(f"{key} = ?")
-                values.append(json_dumps(value) if key == "result_ids_json" and not isinstance(value, str) else value)
+                values.append(json_dumps(value) if key in {"result_ids_json", "payload_json"} and not isinstance(value, str) else value)
         if not fields:
             return
         fields.append("updated_at = ?")
@@ -249,7 +395,10 @@ class Storage:
         data = dict(row)
         data["payload"] = json.loads(data.pop("payload_json"))
         data["result_ids"] = json.loads(data.pop("result_ids_json"))
-        data["percent"] = round((data["completed"] + data["failed"]) / max(1, data["total"]) * 100, 1)
+        terminal = data["completed"] + data["failed"] + data.get("cancelled", 0) + data.get("inconclusive", 0)
+        data["percent"] = round(terminal / max(1, data["total"]) * 100, 1)
+        data["cancellable"] = data["status"] in {"queued", "running"}
+        data["resumable"] = data["status"] in {"cancelled", "interrupted"}
         return data
 
     def list_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
